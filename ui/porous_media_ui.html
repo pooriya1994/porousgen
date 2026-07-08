@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PorousGen — Parameter Builder</title>
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--ink:#e2e8f0;--mut:#94a3b8;--acc:#2dd4bf;
+--acc2:#fb923c;--line:#334155;font-family:system-ui,Segoe UI,Roboto,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink)}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 20px 60px}
+h1{font-size:26px;margin:0}h1 span{color:var(--acc)}
+.sub{color:var(--mut);margin:6px 0 22px;font-size:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+padding:14px 16px;cursor:pointer;transition:.15s}
+.card:hover{border-color:var(--acc)}
+.card.sel{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
+.card h3{margin:0 0 4px;font-size:15px}.card p{margin:0;font-size:12.5px;color:var(--mut)}
+.main{display:grid;grid-template-columns:1.15fr 1fr;gap:18px;margin-top:20px;
+align-items:start}
+@media(max-width:880px){.main{grid-template-columns:1fr}}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:12px;
+padding:18px}
+.row{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:14px}
+label{display:block;font-size:12px;color:var(--mut);margin-bottom:4px}
+input,select{width:100%;background:#0b1220;color:var(--ink);border:1px solid var(--line);
+border-radius:8px;padding:8px 10px;font-size:14px}
+input:focus,select:focus{outline:none;border-color:var(--acc)}
+.por{grid-column:1/-1;display:flex;align-items:center;gap:14px}
+.por input[type=range]{flex:1}
+.por .val{min-width:60px;text-align:center;font-weight:700;color:var(--acc);font-size:18px}
+h4{margin:22px 0 8px;font-size:13px;color:var(--mut);text-transform:uppercase;
+letter-spacing:.08em}
+pre{background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:14px;
+overflow-x:auto;font-size:13px;line-height:1.5;position:relative;margin:8px 0 0}
+.copy{position:absolute;top:8px;right:8px;background:var(--acc);color:#04302b;border:0;
+border-radius:6px;padding:4px 12px;font-size:12px;font-weight:600;cursor:pointer}
+.copy:active{transform:scale(.96)}
+.note{font-size:12.5px;color:var(--mut);margin-top:14px;line-height:1.6}
+kbd{background:#0b1220;border:1px solid var(--line);border-radius:4px;padding:1px 6px}
+.cred{margin-top:34px;font-size:12px;color:var(--mut);border-top:1px solid var(--line);
+padding-top:14px;line-height:1.7}
+.pv-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px}
+.pv-head h3{margin:0;font-size:15px}
+.pv-phi{font-size:13px;color:var(--mut)}
+.pv-phi b{color:var(--acc);font-size:16px}
+.pv-canvas-wrap{position:relative;border-radius:8px;overflow:hidden;
+border:1px solid var(--line);background:#000}
+canvas{display:block;width:100%;height:auto;image-rendering:pixelated}
+.pv-legend{display:flex;gap:16px;margin-top:10px;font-size:12px;color:var(--mut)}
+.pv-legend span{display:inline-flex;align-items:center;gap:6px}
+.swatch{width:12px;height:12px;border-radius:3px;display:inline-block}
+.pv-note{font-size:11.5px;color:var(--mut);margin-top:10px;line-height:1.6;
+border-top:1px solid var(--line);padding-top:10px}
+.spin{display:none;font-size:11px;color:var(--acc)}
+</style>
+</head>
+<body><div class="wrap">
+<h1>Porous<span>Gen</span> — parameter builder</h1>
+<div class="sub">Pick an architecture, tune it, watch the geometry update live.
+Every run writes <b>.dat + .stl + .png + _info.txt</b>.</div>
+
+<div class="grid" id="cards"></div>
+
+<div class="main">
+  <div class="panel">
+    <div class="row" id="params"></div>
+    <h4>Command line</h4>
+    <pre><button class="copy" onclick="cp('cli')">Copy</button><code id="cli"></code></pre>
+    <h4>Python</h4>
+    <pre><button class="copy" onclick="cp('py')">Copy</button><code id="py"></code></pre>
+    <div class="note">Install once with <kbd>pip install .</kbd> inside the package
+    folder (Windows x64 / Linux / macOS — see WINDOWS_BUILD.md for a standalone
+    .exe). Porosity is honoured <b>exactly</b> for cellular, foam, gyroid and
+    blob architectures.</div>
+  </div>
+
+  <div class="panel">
+    <div class="pv-head">
+      <h3>Live preview <span class="spin" id="spin">computing…</span></h3>
+      <div class="pv-phi">preview &phi; = <b id="pvphi">-</b></div>
+    </div>
+    <div class="pv-canvas-wrap"><canvas id="pv" width="130" height="130"></canvas></div>
+    <div class="pv-legend">
+      <span><i class="swatch" style="background:#0b1220"></i> fluid (pore)</span>
+      <span><i class="swatch" style="background:#2dd4bf"></i> solid</span>
+    </div>
+    <div class="pv-note">Schematic 2-D cross-section computed in-browser with a
+    lightweight re-implementation of the same algorithm (Voronoi tessellation,
+    RSA packing, TPMS, Gaussian random field, ...). It approximates, not
+    replaces, the exact output of <kbd>porousgen</kbd>, which always runs the
+    real generator at your chosen resolution and dimension.</div>
+  </div>
+</div>
+
+<div class="cred">
+<b>PorousGen v1.0</b> - Applied Multi-phase Fluid Dynamics Laboratory,
+Iran University of Science and Technology, Tehran, Iran<br>
+Pooriya Ghorbani (Ph.D. Student) - p_ghorbani@mecheng.iust.ac.ir -
+Majid Siavashi (Associate Professor, corresponding) - msiavashi@iust.ac.ir<br>
+License: MIT
+</div>
+</div>
+
+<script>
+const GEOMS = {
+ granular:{t:"Granular",d:"RSA sphere / disc packing - packed adsorbent beds",
+  fn:"generate_granular",por:null,
+  p:{radius:[0.05,"particle radius"],particles:[120,"n particles"]}},
+ fibrous:{t:"Fibrous",d:"random cylinders - filters, fibre mats, GDLs",
+  fn:"generate_fibrous",por:null,
+  p:{radius:[0.02,"fiber radius"],fibers:[120,"n fibers"]}},
+ cellular:{t:"Cellular (walls)",d:"Voronoi FACE network - closed-cell solids",
+  fn:"generate_cellular",por:0.80,p:{cells:[35,"Voronoi seeds"]}},
+ foam:{t:"Open-cell foam",d:"Voronoi STRUT network - metal / ceramic foams",
+  fn:"generate_open_foam",por:0.90,p:{cells:[6,"cells per axis"]}},
+ fractured:{t:"Fractured",d:"solid matrix + planar fractures - tight rock",
+  fn:"generate_consolidated",por:null,
+  p:{fractures:[8,"n fractures"],width:[0.02,"fracture width"]}},
+ gyroid:{t:"Gyroid (TPMS)",d:"triply-periodic minimal surface - lattices",
+  fn:"generate_ordered_gyroid",por:0.70,p:{cells:[3,"unit cells"]}},
+ blob:{t:"Stochastic blobs",d:"Gaussian random field - soils, sandstones",
+  fn:"generate_blob",por:0.60,p:{corr:[0.08,"correlation length"]}},
+ spheres:{t:"Overlapping spheres",d:"Boolean model - consolidated media",
+  fn:"generate_overlapping_spheres",por:0.55,p:{radius:[0.07,"sphere radius"]}}
+};
+let sel="foam", vals={};
+
+function cards(){
+ const c=document.getElementById("cards"); c.innerHTML="";
+ for(const[k,g] of Object.entries(GEOMS)){
+  const d=document.createElement("div");
+  d.className="card"+(k===sel?" sel":"");
+  d.innerHTML="<h3>"+g.t+"</h3><p>"+g.d+"</p>";
+  d.onclick=(function(kk){return function(){sel=kk; vals={}; cards(); params();};})(k);
+  c.appendChild(d);
+ }
+}
+function inp(id,label,val,step){
+ return '<div><label>'+label+'</label><input id="'+id+'" value="'+val+
+  '" step="'+(step||'any')+'" type="number" oninput="upd()"></div>';
+}
+function params(){
+ const g=GEOMS[sel]; let h="";
+ h+=inp("resolution","resolution (voxels/axis)",vals.resolution||96,1);
+ h+='<div><label>dimension</label><select id="dim" onchange="upd()">'+
+    '<option value="3" '+(vals.dim!=2?"selected":"")+'>3-D</option>'+
+    '<option value="2" '+(vals.dim==2?"selected":"")+'>2-D</option></select></div>';
+ h+=inp("size","domain size (physical)",vals.size||1.0);
+ h+=inp("seed","random seed",vals.seed||42,1);
+ h+='<div><label>output basename</label><input id="out" type="text" value="'+
+    (vals.out||"my_geometry")+'" oninput="upd()"></div>';
+ for(const k in g.p){ h+=inp(k, g.p[k][1], (vals[k]!==undefined?vals[k]:g.p[k][0])); }
+ if(g.por!==null){
+  h+='<div class="por"><label style="margin:0">target porosity</label>'+
+     '<input type="range" id="porosity" min="0.2" max="0.97" step="0.01" value="'+
+     (vals.porosity||g.por)+'" oninput="upd()">'+
+     '<div class="val" id="porv">'+(vals.porosity||g.por)+'</div></div>';
+ }
+ document.getElementById("params").innerHTML=h; upd();
+}
+function upd(){
+ const g=GEOMS[sel]; function get(id){var e=document.getElementById(id); return e?e.value:undefined;}
+ vals={resolution:get("resolution"),dim:get("dim"),size:get("size"),
+       seed:get("seed"),out:get("out")||"my_geometry"};
+ for(const k in g.p) vals[k]=get(k);
+ if(g.por!==null){vals.porosity=get("porosity");
+   document.getElementById("porv").textContent=(+vals.porosity).toFixed(2);}
+ var cli="porousgen "+sel+" --resolution "+vals.resolution+" --dim "+vals.dim+
+  " --size "+vals.size+" --seed "+vals.seed;
+ if(g.por!==null) cli+=" --porosity "+vals.porosity;
+ for(const k in g.p) cli+=" --"+k+" "+vals[k];
+ cli+=" --out "+vals.out;
+ document.getElementById("cli").textContent=cli;
+
+ var dimN=+vals.dim;
+ var shapeArr=[]; for(var i=0;i<dimN;i++) shapeArr.push(vals.resolution);
+ var domArr=[]; for(var i2=0;i2<dimN;i2++) domArr.push(vals.size);
+ var shape="("+shapeArr.join(", ")+(dimN===1?",":"")+")";
+ var dom="("+domArr.join(", ")+(dimN===1?",":"")+")";
+ var argmap={cells:(sel==="cellular"?"n_seeds":"n_cells"),
+  particles:"n_particles",fibers:"n_fibers",fractures:"n_fractures",
+  width:"fracture_width",corr:"correlation_length",
+  radius:(sel==="fibrous"?"fiber_radius":"radius")};
+ var args=["shape="+shape,"domain_size="+dom];
+ if(g.por!==null) args.push((sel==="cellular"||sel==="gyroid"?"target_porosity=":"porosity=")+vals.porosity);
+ for(const k in g.p) args.push((argmap[k]||k)+"="+vals[k]);
+ args.push("seed="+vals.seed);
+ var py="from porousgen import "+g.fn+", export_all\n\n"+
+  "g = "+g.fn+"("+args.join(", ")+")\n"+
+  "export_all(g, \""+vals.out+"\", domain_size="+dom+",\n"+
+  "           params={\"type\": \""+sel+"\"})";
+ document.getElementById("py").textContent=py;
+ schedulePreview();
+}
+function cp(id){
+ navigator.clipboard.writeText(document.getElementById(id).textContent);
+}
+
+/* ---------------------- LIVE PREVIEW (Canvas) ----------------------
+   Lightweight JS re-implementations of each generator on a small 2-D grid,
+   for a fast interactive preview. Simplified (grid BFS distance instead of
+   true Euclidean transform) - NOT the solver, just a visual guide. The real
+   geometry always comes from running porousgen (see CLI / Python panels). */
+var N = 130;
+var rngState = 1;
+function rng(){ rngState=(rngState*1103515245+12345)&0x7fffffff; return rngState/0x7fffffff; }
+function seedRng(s){ rngState = (s*2654435761)%0x7fffffff || 1; }
+
+function bfsDistance(seedMask){
+ var dist = new Int32Array(N*N).fill(-1);
+ var qx=[], qy=[];
+ for(var y=0;y<N;y++)for(var x=0;x<N;x++) if(seedMask[y*N+x]){dist[y*N+x]=0; qx.push(x); qy.push(y);}
+ var head=0;
+ var dx=[1,-1,0,0], dy=[0,0,1,-1];
+ while(head<qx.length){
+  var x=qx[head], y=qy[head]; head++;
+  var d=dist[y*N+x];
+  for(var k=0;k<4;k++){
+   var nx=x+dx[k], ny=y+dy[k];
+   if(nx<0||ny<0||nx>=N||ny>=N) continue;
+   if(dist[ny*N+nx]===-1){dist[ny*N+nx]=d+1; qx.push(nx); qy.push(ny);}
+  }
+ }
+ return dist;
+}
+function exactPorosityFromDist(dist, porosity){
+ var total=N*N, k=Math.round((1-porosity)*total);
+ var idx=[]; for(var i=0;i<total;i++) idx.push(i);
+ idx.sort(function(a,b){return dist[a]-dist[b];});
+ var solid=new Uint8Array(total);
+ for(var j=0;j<k;j++) solid[idx[j]]=1;
+ return solid;
+}
+
+function pv_granular(radius,particles){
+ var solid=new Uint8Array(N*N);
+ var R=Math.max(1,radius*N*0.5*1.4);
+ var pts=[];
+ var tries=0;
+ while(pts.length<particles && tries<particles*40){
+  tries++;
+  var cx=rng()*N, cy=rng()*N;
+  var ok=true;
+  for(var p=0;p<pts.length;p++){ var dd=(pts[p][0]-cx)*(pts[p][0]-cx)+(pts[p][1]-cy)*(pts[p][1]-cy); if(dd < (2*R)*(2*R)*0.85){ok=false;break;} }
+  if(ok) pts.push([cx,cy]);
+ }
+ for(var q=0;q<pts.length;q++){
+  var cx2=pts[q][0], cy2=pts[q][1];
+  var x0=Math.max(0,Math.floor(cx2-R)), x1=Math.min(N,Math.ceil(cx2+R));
+  var y0=Math.max(0,Math.floor(cy2-R)), y1=Math.min(N,Math.ceil(cy2+R));
+  for(var y=y0;y<y1;y++)for(var x=x0;x<x1;x++)
+   if((x-cx2)*(x-cx2)+(y-cy2)*(y-cy2)<=R*R) solid[y*N+x]=1;
+ }
+ return solid;
+}
+function pv_fibrous(radius,fibers){
+ var solid=new Uint8Array(N*N);
+ var w=Math.max(1,radius*N*0.5*1.6);
+ for(var f=0;f<fibers;f++){
+  var ang=rng()*Math.PI, len=N*(0.35+rng()*0.4);
+  var cx=rng()*N, cy=rng()*N;
+  var dx=Math.cos(ang)*len/2, dy=Math.sin(ang)*len/2;
+  var steps=Math.ceil(len);
+  for(var s=0;s<=steps;s++){
+   var t=s/steps, x=cx-dx+2*dx*t, y=cy-dy+2*dy*t;
+   var x0=Math.max(0,Math.floor(x-w)),x1=Math.min(N,Math.ceil(x+w));
+   var y0=Math.max(0,Math.floor(y-w)),y1=Math.min(N,Math.ceil(y+w));
+   for(var yy=y0;yy<y1;yy++)for(var xx=x0;xx<x1;xx++)
+    if((xx-x)*(xx-x)+(yy-y)*(yy-y)<=w*w) solid[yy*N+xx]=1;
+  }
+ }
+ return solid;
+}
+function voronoiLabels(seeds){
+ var label=new Int32Array(N*N);
+ for(var y=0;y<N;y++)for(var x=0;x<N;x++){
+  var best=-1,bd=1e18;
+  for(var i=0;i<seeds.length;i++){
+   var d=(seeds[i][0]-x)*(seeds[i][0]-x)+(seeds[i][1]-y)*(seeds[i][1]-y);
+   if(d<bd){bd=d;best=i;}
+  }
+  label[y*N+x]=best;
+ }
+ return label;
+}
+function pv_cellular(nseeds,porosity){
+ var seeds=[]; for(var i=0;i<nseeds;i++) seeds.push([rng()*N,rng()*N]);
+ var label=voronoiLabels(seeds);
+ var onWall=new Uint8Array(N*N);
+ for(var y=0;y<N;y++)for(var x=0;x<N;x++){
+  var c=label[y*N+x];
+  if(x+1<N && label[y*N+x+1]!==c) onWall[y*N+x]=1;
+  if(y+1<N && label[(y+1)*N+x]!==c) onWall[y*N+x]=1;
+ }
+ var dist=bfsDistance(onWall);
+ return exactPorosityFromDist(dist, porosity);
+}
+function pv_foam(ncells,porosity){
+ var n=Math.max(2,ncells);
+ var seeds=[];
+ for(var i=0;i<n;i++)for(var j=0;j<n;j++){
+  var jx=(rng()-0.5)*0.7*(N/n), jy=(rng()-0.5)*0.7*(N/n);
+  seeds.push([(i+0.5)*N/n+jx,(j+0.5)*N/n+jy]);
+ }
+ var skeleton=new Float64Array(N*N);
+ for(var y=0;y<N;y++)for(var x=0;x<N;x++){
+  var d0=1e18,d1=1e18,d2=1e18;
+  for(var s=0;s<seeds.length;s++){
+   var dd=(seeds[s][0]-x)*(seeds[s][0]-x)+(seeds[s][1]-y)*(seeds[s][1]-y);
+   if(dd<d0){d2=d1;d1=d0;d0=dd;}
+   else if(dd<d1){d2=d1;d1=dd;}
+   else if(dd<d2){d2=dd;}
+  }
+  skeleton[y*N+x]=Math.sqrt(d2)-Math.sqrt(d0);
+ }
+ var sorted=Array.prototype.slice.call(skeleton).sort(function(a,b){return a-b;});
+ var cut=sorted[Math.floor(sorted.length*0.04)];
+ var skelMask=new Uint8Array(N*N);
+ for(var k=0;k<N*N;k++) skelMask[k]=skeleton[k]<=cut?1:0;
+ var dist=bfsDistance(skelMask);
+ return exactPorosityFromDist(dist, porosity);
+}
+function pv_fractured(nfrac,width){
+ var solid=new Uint8Array(N*N).fill(1);
+ var w=Math.max(1,width*N*0.5*1.6);
+ for(var f=0;f<nfrac;f++){
+  var ang=rng()*Math.PI, cx=rng()*N, cy=rng()*N;
+  var dx=Math.cos(ang), dy=Math.sin(ang);
+  for(var t=-N;t<N;t++){
+   var x=cx+dx*t, y=cy+dy*t;
+   if(x<0||y<0||x>=N||y>=N) continue;
+   var x0=Math.max(0,Math.floor(x-w)),x1=Math.min(N,Math.ceil(x+w));
+   var y0=Math.max(0,Math.floor(y-w)),y1=Math.min(N,Math.ceil(y+w));
+   for(var yy=y0;yy<y1;yy++)for(var xx=x0;xx<x1;xx++)
+    if((xx-x)*(xx-x)+(yy-y)*(yy-y)<=w*w) solid[yy*N+xx]=0;
+  }
+ }
+ return solid;
+}
+function pv_gyroid(ncells,porosity){
+ var k=2*Math.PI*ncells/N;
+ var field=new Float64Array(N*N);
+ for(var y=0;y<N;y++)for(var x=0;x<N;x++){
+  field[y*N+x]=Math.sin(k*x+0.9*Math.sin(k*y))+0.6*Math.cos(k*y-0.5*Math.sin(k*x));
+ }
+ var sorted=Array.prototype.slice.call(field).sort(function(a,b){return a-b;});
+ var cut=sorted[Math.floor(sorted.length*porosity)];
+ var solid=new Uint8Array(N*N);
+ for(var i=0;i<N*N;i++) solid[i]=field[i]>cut?1:0;
+ return solid;
+}
+function pv_blob(corr,porosity){
+ var nwaves=10;
+ var freqBase=1/Math.max(0.02,corr)*0.06;
+ var waves=[];
+ for(var i=0;i<nwaves;i++) waves.push({
+  fx:(rng()-0.5)*freqBase,fy:(rng()-0.5)*freqBase,ph:rng()*6.28,amp:0.5+rng()
+ });
+ var field=new Float64Array(N*N);
+ for(var y=0;y<N;y++)for(var x=0;x<N;x++){
+  var v=0;
+  for(var w=0;w<waves.length;w++) v+=waves[w].amp*Math.sin(waves[w].fx*x+waves[w].fy*y+waves[w].ph);
+  field[y*N+x]=v;
+ }
+ var sorted=Array.prototype.slice.call(field).sort(function(a,b){return a-b;});
+ var cut=sorted[Math.floor(sorted.length*porosity)];
+ var solid=new Uint8Array(N*N);
+ for(var j=0;j<N*N;j++) solid[j]=field[j]>cut?1:0;
+ return solid;
+}
+function pv_spheres(radius,porosity){
+ var solid=new Uint8Array(N*N);
+ var R=Math.max(1,radius*N*0.5*1.3);
+ var target=(1-porosity)*N*N;
+ var count=0, tries=0;
+ while(count<target && tries<4000){
+  tries++;
+  var cx=rng()*N, cy=rng()*N;
+  var x0=Math.max(0,Math.floor(cx-R)),x1=Math.min(N,Math.ceil(cx+R));
+  var y0=Math.max(0,Math.floor(cy-R)),y1=Math.min(N,Math.ceil(cy+R));
+  for(var y=y0;y<y1;y++)for(var x=x0;x<x1;x++){
+   if((x-cx)*(x-cx)+(y-cy)*(y-cy)<=R*R && !solid[y*N+x]){solid[y*N+x]=1; count++;}
+  }
+ }
+ return solid;
+}
+
+var pvTimer=null;
+function schedulePreview(){
+ clearTimeout(pvTimer);
+ document.getElementById("spin").style.display="inline";
+ pvTimer=setTimeout(renderPreview, 90);
+}
+function renderPreview(){
+ var g=GEOMS[sel];
+ seedRng((+vals.seed||1)+1);
+ var solid;
+ function num(k){return +vals[k];}
+ try{
+  if(sel==="granular")  solid=pv_granular(num("radius"),Math.min(num("particles"),260));
+  else if(sel==="fibrous")  solid=pv_fibrous(num("radius"),Math.min(num("fibers"),260));
+  else if(sel==="cellular") solid=pv_cellular(Math.min(num("cells"),60),num("porosity"));
+  else if(sel==="foam")     solid=pv_foam(Math.min(num("cells"),10),num("porosity"));
+  else if(sel==="fractured")solid=pv_fractured(Math.min(num("fractures"),40),num("width"));
+  else if(sel==="gyroid")   solid=pv_gyroid(num("cells"),num("porosity"));
+  else if(sel==="blob")     solid=pv_blob(num("corr"),num("porosity"));
+  else if(sel==="spheres")  solid=pv_spheres(num("radius"),num("porosity"));
+ }catch(e){ console.warn(e); solid=new Uint8Array(N*N); }
+
+ var cv=document.getElementById("pv"), ctx=cv.getContext("2d");
+ var img=ctx.createImageData(N,N);
+ var fluidC=[11,18,32], solidC=[45,212,191];
+ var nSolid=0;
+ for(var i=0;i<N*N;i++){
+  var c = solid[i] ? solidC : fluidC;
+  if(solid[i]) nSolid++;
+  img.data[i*4]=c[0]; img.data[i*4+1]=c[1]; img.data[i*4+2]=c[2]; img.data[i*4+3]=255;
+ }
+ ctx.putImageData(img,0,0);
+ document.getElementById("pvphi").textContent=(1-nSolid/(N*N)).toFixed(3);
+ document.getElementById("spin").style.display="none";
+}
+
+cards(); params();
+</script>
+</body></html>
