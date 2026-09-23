@@ -11,6 +11,7 @@ from PyInstaller.utils.hooks import collect_submodules
 a = Analysis(['run_porousgen.py'],
              pathex=['.'],
              hiddenimports=(['porousgen', 'porousgen.generator', 'porousgen.cli',
+                             'porousgen._core', 'porousgen.metrics',
                              'mpl_toolkits.mplot3d', 'matplotlib.backends.backend_agg']
                             + collect_submodules('scipy')
                             + collect_submodules('skimage')

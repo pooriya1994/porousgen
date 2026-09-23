@@ -72,13 +72,17 @@ Every run writes <b>.dat + .stl + .png + _info.txt</b>.</div>
     <pre><button class="copy" onclick="cp('py')">Copy</button><code id="py"></code></pre>
     <div class="note">Install once with <kbd>pip install .</kbd> inside the package
     folder (Windows x64 / Linux / macOS — see WINDOWS_BUILD.md for a standalone
-    .exe). Porosity is honoured <b>exactly</b> for cellular, foam, gyroid and
-    blob architectures.</div>
+    .exe). Porosity is honoured <b>exactly</b> for cellular, foam, gyroid,
+    blob and overlapping-sphere architectures (and for fibrous / fractured when a
+    porosity is passed in Python). The command is lower-case <kbd>porousgen</kbd>;
+    <kbd>python -m porousgen.cli</kbd> is equivalent.</div>
   </div>
 
   <div class="panel">
     <div class="pv-head">
       <h3>Live preview <span class="spin" id="spin">computing…</span></h3>
+      <div class="note" style="margin:0 0 6px 0">Fast, simplified 2-D illustration for choosing
+      parameters. The geometry itself is produced by the Python package and will differ in detail.</div>
       <div class="pv-phi">preview &phi; = <b id="pvphi">-</b></div>
     </div>
     <div class="pv-canvas-wrap"><canvas id="pv" width="130" height="130"></canvas></div>
@@ -106,24 +110,24 @@ License: MIT
 <script>
 const GEOMS = {
  granular:{t:"Granular",d:"RSA sphere / disc packing - packed adsorbent beds",
-  fn:"generate_granular",por:null,
+  fn:"generate_granular",por:null,per:true,
   p:{radius:[0.05,"particle radius"],particles:[120,"n particles"]}},
  fibrous:{t:"Fibrous",d:"random cylinders - filters, fibre mats, GDLs",
-  fn:"generate_fibrous",por:null,
+  fn:"generate_fibrous",por:null,per:true,
   p:{radius:[0.02,"fiber radius"],fibers:[120,"n fibers"]}},
  cellular:{t:"Cellular (walls)",d:"Voronoi FACE network - closed-cell solids",
-  fn:"generate_cellular",por:0.80,p:{cells:[35,"Voronoi seeds"]}},
+  fn:"generate_cellular",por:0.80,per:true,p:{cells:[35,"Voronoi seeds"]}},
  foam:{t:"Open-cell foam",d:"Voronoi STRUT network - metal / ceramic foams",
-  fn:"generate_open_foam",por:0.90,p:{cells:[6,"cells per axis"]}},
+  fn:"generate_open_foam",por:0.90,per:true,p:{cells:[6,"cells per axis"]}},
  fractured:{t:"Fractured",d:"solid matrix + planar fractures - tight rock",
-  fn:"generate_consolidated",por:null,
+  fn:"generate_consolidated",por:null,per:false,
   p:{fractures:[8,"n fractures"],width:[0.02,"fracture width"]}},
  gyroid:{t:"Gyroid (TPMS)",d:"triply-periodic minimal surface - lattices",
-  fn:"generate_ordered_gyroid",por:0.70,p:{cells:[3,"unit cells"]}},
+  fn:"generate_ordered_gyroid",por:0.70,per:false,p:{cells:[3,"unit cells"]}},
  blob:{t:"Stochastic blobs",d:"Gaussian random field - soils, sandstones",
-  fn:"generate_blob",por:0.60,p:{corr:[0.08,"correlation length"]}},
+  fn:"generate_blob",por:0.60,per:true,p:{corr:[0.08,"correlation length"]}},
  spheres:{t:"Overlapping spheres",d:"Boolean model - consolidated media",
-  fn:"generate_overlapping_spheres",por:0.55,p:{radius:[0.07,"sphere radius"]}}
+  fn:"generate_overlapping_spheres",por:0.55,per:true,p:{radius:[0.07,"sphere radius"]}}
 };
 let sel="foam", vals={};
 
@@ -158,6 +162,12 @@ function params(){
      (vals.porosity||g.por)+'" oninput="upd()">'+
      '<div class="val" id="porv">'+(vals.porosity||g.por)+'</div></div>';
  }
+ if(g.per){
+  h+='<div><label><input type="checkbox" id="periodic" onchange="upd()"'+(vals.periodic?' checked':'')+
+     '> periodic (tileable RVE)</label></div>';
+ }
+ h+='<div><label><input type="checkbox" id="metrics" onchange="upd()"'+(vals.metrics?' checked':'')+
+    '> structural metrics</label></div>';
  document.getElementById("params").innerHTML=h; upd();
 }
 function upd(){
@@ -165,12 +175,16 @@ function upd(){
  vals={resolution:get("resolution"),dim:get("dim"),size:get("size"),
        seed:get("seed"),out:get("out")||"my_geometry"};
  for(const k in g.p) vals[k]=get(k);
+ function chk(id){var e=document.getElementById(id); return !!(e&&e.checked);}
+ vals.periodic=g.per?chk("periodic"):false; vals.metrics=chk("metrics");
  if(g.por!==null){vals.porosity=get("porosity");
    document.getElementById("porv").textContent=(+vals.porosity).toFixed(2);}
  var cli="porousgen "+sel+" --resolution "+vals.resolution+" --dim "+vals.dim+
   " --size "+vals.size+" --seed "+vals.seed;
  if(g.por!==null) cli+=" --porosity "+vals.porosity;
  for(const k in g.p) cli+=" --"+k+" "+vals[k];
+ if(vals.periodic) cli+=" --periodic";
+ if(vals.metrics) cli+=" --metrics";
  cli+=" --out "+vals.out;
  document.getElementById("cli").textContent=cli;
 
@@ -187,10 +201,13 @@ function upd(){
  if(g.por!==null) args.push((sel==="cellular"||sel==="gyroid"?"target_porosity=":"porosity=")+vals.porosity);
  for(const k in g.p) args.push((argmap[k]||k)+"="+vals[k]);
  args.push("seed="+vals.seed);
+ if(vals.periodic) args.push("periodic=True");
+ args.push("return_info=True");
  var py="from porousgen import "+g.fn+", export_all\n\n"+
-  "g = "+g.fn+"("+args.join(", ")+")\n"+
+  "g, info = "+g.fn+"("+args.join(", ")+")\n"+
   "export_all(g, \""+vals.out+"\", domain_size="+dom+",\n"+
-  "           params={\"type\": \""+sel+"\"})";
+  "           params={\"type\": \""+sel+"\"}, info=info"+
+  (vals.metrics?", metrics=True":"")+")";
  document.getElementById("py").textContent=py;
  schedulePreview();
 }
@@ -345,11 +362,8 @@ function pv_gyroid(ncells,porosity){
  for(var y=0;y<N;y++)for(var x=0;x<N;x++){
   field[y*N+x]=Math.sin(k*x+0.9*Math.sin(k*y))+0.6*Math.cos(k*y-0.5*Math.sin(k*x));
  }
- var sorted=Array.prototype.slice.call(field).sort(function(a,b){return a-b;});
- var cut=sorted[Math.floor(sorted.length*porosity)];
- var solid=new Uint8Array(N*N);
- for(var i=0;i<N*N;i++) solid[i]=field[i]>cut?1:0;
- return solid;
+ var neg=new Float64Array(N*N); for(var q=0;q<N*N;q++) neg[q]=-field[q];
+ return exactPorosityFromDist(neg, porosity);   // exact count, as in the Python package
 }
 function pv_blob(corr,porosity){
  var nwaves=10;
@@ -364,11 +378,8 @@ function pv_blob(corr,porosity){
   for(var w=0;w<waves.length;w++) v+=waves[w].amp*Math.sin(waves[w].fx*x+waves[w].fy*y+waves[w].ph);
   field[y*N+x]=v;
  }
- var sorted=Array.prototype.slice.call(field).sort(function(a,b){return a-b;});
- var cut=sorted[Math.floor(sorted.length*porosity)];
- var solid=new Uint8Array(N*N);
- for(var j=0;j<N*N;j++) solid[j]=field[j]>cut?1:0;
- return solid;
+ var neg=new Float64Array(N*N); for(var q=0;q<N*N;q++) neg[q]=-field[q];
+ return exactPorosityFromDist(neg, porosity);   // exact count, as in the Python package
 }
 function pv_spheres(radius,porosity){
  var solid=new Uint8Array(N*N);

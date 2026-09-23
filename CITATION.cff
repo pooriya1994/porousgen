@@ -1,11 +1,18 @@
 cff-version: 1.2.0
 title: "PorousGen: an LBM-ready porous-media geometry generator"
-message: "If you use this software, please cite it as below."
+message: "If you use this software, please cite the version you used."
 type: software
-version: 1.0.0
-date-released: 2026-07-04
+version: 1.1.0
+date-released: 2026-09-23   # update to the actual release date when tagging
 license: MIT
 repository-code: "https://github.com/pooriya1994/porousgen"
+# doi: 10.5281/zenodo.XXXXXXX   # concept DOI - add after the first Zenodo archive
+keywords:
+  - porous media
+  - lattice Boltzmann
+  - PALABOS
+  - geometry generation
+  - exact porosity
 authors:
   - family-names: Ghorbani
     given-names: Pooriya

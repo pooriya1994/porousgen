@@ -41,7 +41,7 @@ Dependencies:  pip install numpy scipy matplotlib scikit-image
 ================================================================================
 """
 
-__version__  = "1.0.0"
+__version__  = "1.1.0"
 __author__   = "Pooriya Ghorbani, Majid Siavashi"
 __email__    = "p_ghorbani@mecheng.iust.ac.ir"
 __license__  = "MIT"
@@ -55,15 +55,14 @@ import os
 import struct
 import time
 import warnings
-warnings.filterwarnings("ignore")
 
 # ─── third-party (required) ───────────────────────────────────────────────────
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.colors import LinearSegmentedColormap
-from scipy.spatial import cKDTree
-from scipy.ndimage import binary_dilation, label
+
+from . import _core as C
 # Force-register the 3-D ("projection='3d'") axes plugin. matplotlib enables
 # 3-D plotting via a projection-registry side effect of importing this
 # submodule, NOT a direct call anywhere in this file. PyInstaller's static
@@ -117,6 +116,27 @@ _SUB_CLR   = "#8b949e"
 #  SECTION 1  ─  SHARED UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ──────────────────────────────────────────────────────────────────────────────
+#  Capability table (single source of truth for docs, CLI and tests)
+# ──────────────────────────────────────────────────────────────────────────────
+#  porosity : "exact"    - count selection, exactly round(phi*N) fluid voxels
+#             "optional" - exact when a porosity is passed, else geometric
+#             "indirect" - set by counts/radii only; realised value reported
+#  periodic : "switch"    - `periodic=True/False` (default False)
+#             "intrinsic" - periodic whenever the box holds whole unit cells
+#             "no"        - non-periodic only
+GENERATOR_INFO = {
+    "granular":            dict(function="generate_granular",            porosity="indirect", periodic="switch"),
+    "fibrous":             dict(function="generate_fibrous",             porosity="optional", periodic="switch"),
+    "cellular":            dict(function="generate_cellular",            porosity="optional", periodic="switch"),
+    "consolidated":        dict(function="generate_consolidated",        porosity="optional", periodic="no"),
+    "gyroid":              dict(function="generate_ordered_gyroid",      porosity="exact",    periodic="intrinsic"),
+    "open_foam":           dict(function="generate_open_foam",           porosity="exact",    periodic="switch"),
+    "blob":                dict(function="generate_blob",                porosity="exact",    periodic="switch"),
+    "overlapping_spheres": dict(function="generate_overlapping_spheres", porosity="exact",    periodic="switch"),
+}
+
+
 def compute_porosity(grid: np.ndarray) -> float:
     """
     Compute the porosity φ = N_fluid / N_total.
@@ -132,21 +152,13 @@ def compute_porosity(grid: np.ndarray) -> float:
 def _solidify_to_porosity(dist: np.ndarray, porosity: float,
                           seed: int = 0) -> np.ndarray:
     """
-    EXACT porosity by construction: mark the k = round((1-φ)·N) voxels with
-    the SMALLEST distance-to-skeleton as solid. Ties (e.g. the zero-distance
-    skeleton itself) are broken randomly, so targets both above and below the
-    raw skeleton fraction are honoured — the skeleton is thinned or thickened
-    as needed. Quantile thresholding fails on tie plateaus; this cannot.
+    EXACT porosity by construction: mark exactly k = round((1-phi)*N) voxels
+    with the SMALLEST values of `dist` as solid (see _core.select_k_smallest).
+    Ties at the cut-off value are resolved by a seeded random draw from the
+    tie set, so the count is exact for any field, including fields with
+    large plateaus of equal values where a scalar threshold cannot hit it.
     """
-    n = dist.size
-    k = int(round((1.0 - porosity) * n))
-    k = min(max(k, 0), n)
-    rng = np.random.default_rng(seed)
-    keys = dist.ravel() + rng.uniform(0, 1e-9, n)   # random tie-break
-    order = np.argpartition(keys, max(k - 1, 0))[:k]
-    solid = np.zeros(n, dtype=bool)
-    solid[order] = True
-    return solid.reshape(dist.shape)
+    return C.select_k_smallest(dist, C.solid_count(porosity, dist.size), seed=seed)
 
 
 def _voxel_centres(shape: tuple, domain_size: tuple) -> list:
@@ -229,21 +241,29 @@ def export_palabos(
     g = grid.astype(np.int8)
     os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
 
-    with open(filename, "w", encoding="utf-8") as fh:
+    if g.min() < 0 or g.max() > 9:
+        raise ValueError("export_palabos writes single-digit voxel labels (0..9)")
+
+    # Vectorised writer: each row "d\td\t...\td\n" is exactly 2*ncols bytes,
+    # so a whole slice is assembled as one uint8 array and written at once.
+    # Output is byte-identical to the v1.0 row-by-row writer.
+    def _rows_bytes(block):                     # block: (nrows, ncols) ints
+        nrows, ncols = block.shape
+        buf = np.empty((nrows, 2 * ncols), dtype=np.uint8)
+        buf[:, 0::2] = block.astype(np.uint8) + ord("0")
+        buf[:, 1::2] = ord("\t")
+        buf[:, -1] = ord("\n")
+        return buf.tobytes()
+
+    with open(filename, "wb") as fh:
         if g.ndim == 2:
-            # ── 2-D layout ────────────────────────────────────────────────────
-            for ix in range(g.shape[0]):
-                fh.write("\t".join(map(str, g[ix, :].tolist())))
-                fh.write("\n")
+            fh.write(_rows_bytes(g))
         else:
-            # ── 3-D layout ─────────────────────────────────────────────────────
-            nx, ny, nz = g.shape
+            nx = g.shape[0]
             for ix in range(nx):
-                for iy in range(ny):
-                    fh.write("\t".join(map(str, g[ix, iy, :].tolist())))
-                    fh.write("\n")
+                fh.write(_rows_bytes(g[ix]))
                 if ix < nx - 1:
-                    fh.write("\n")   # blank line between x-slices
+                    fh.write(b"\n")            # blank line between x-slices
 
     if verbose:
         phi  = compute_porosity(g)
@@ -252,30 +272,57 @@ def export_palabos(
               f"shape={g.shape}  φ={phi:.4f}  ({size:.0f} KB)")
 
 
+def read_palabos(filename: str, shape: tuple = None) -> np.ndarray:
+    """
+    Read a PorousGen / PALABOS text voxel file (.dat) back into an int8 grid.
+
+    The shape is inferred from the layout written by export_palabos:
+    one block of rows (2-D: nx rows of ny values), or nx blocks of ny rows
+    of nz values separated by blank lines (3-D). A 3-D grid with nx = 1 has
+    no separator and is indistinguishable from 2-D; pass `shape` to resolve
+    it (the <numDomain> block of the info file records the shape).
+    """
+    with open(filename, "r", encoding="utf-8") as fh:
+        text = fh.read().strip("\n")
+    blocks = [b for b in text.split("\n\n") if b.strip()]
+    first = blocks[0].split("\n")
+    rows, cols = len(first), len(first[0].split())
+    data = np.array(text.split(), dtype=np.int8)
+    if shape is not None:
+        return data.reshape(shape)
+    if len(blocks) == 1:
+        return data.reshape(rows, cols)
+    return data.reshape(len(blocks), rows, cols)
+
+
 def export_stl(
-    grid:     np.ndarray,
-    filename: str,
-    verbose:  bool = True,
+    grid:        np.ndarray,
+    filename:    str,
+    verbose:     bool  = True,
+    domain_size: tuple = None,
+    closed:      bool  = True,
 ) -> None:
     """
-    Export a 3-D voxel grid as a binary STL surface mesh.
+    Export the SOLID phase of a 3-D voxel grid as a binary STL surface mesh.
 
     Algorithm
     ---------
-    1.  Marching-cubes (scikit-image) extracts the triangulated iso-surface
-        at level 0.5, which sits at the fluid / solid boundary.
-    2.  The triangle vertices and normals are packed into a binary STL file
-        using Python's struct module — no external STL library required.
+    1. Marching cubes (scikit-image) on the solid indicator at iso-level 0.5,
+       i.e. through the fluid/solid voxel interfaces.
+    2. Coordinates are written in PHYSICAL units, consistent with the .dat
+       file and domain_size: voxel i is centred at (i + 1/2) * dx.
+    3. closed=True (default) pads the grid with one layer of fluid before
+       meshing, so the surface is also capped where solid meets a domain
+       face and the mesh is WATERTIGHT (every edge shared by exactly two
+       triangles). closed=False reproduces the v1.0 open surface.
+    4. The binary STL is written in one vectorised call.
 
-    If trimesh is installed the mesh is also cleaned (duplicate vertices,
-    degenerate faces removed) before writing.
-
-    Falls back gracefully when scikit-image is unavailable.
-
-    Parameters
-    ----------
-    grid     : np.ndarray  shape (nx, ny, nz)   3-D only
-    filename : str         output path  (.stl)
+    Scope
+    -----
+    The mesh reproduces the voxel geometry, including its voxel-scale
+    staircase; it is intended for visualisation, 3-D printing and as input
+    to a surface-meshing tool. It is NOT a smoothed, body-fitted CFD mesh -
+    the .dat voxel file is the simulation input for lattice-Boltzmann codes.
     """
     if not _HAS_MARCHING_CUBES:
         print("  [STL] Skipped — install scikit-image to enable mesh export.")
@@ -283,51 +330,45 @@ def export_stl(
     if grid.ndim != 3:
         print("  [STL] Skipped — STL export requires a 3-D grid.")
         return
-
     os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
 
-    # ── Marching cubes ────────────────────────────────────────────────────────
-    # The iso-level 0.5 sits exactly at the fluid/solid interface.
-    # `step_size=1` uses every voxel; increase for coarser but faster meshes.
-    verts, faces, normals, _ = _mc(
-        grid.astype(np.float32), level=0.5, step_size=1, allow_degenerate=False)
+    if domain_size is None:
+        h = np.ones(3)
+    else:
+        h = np.array([domain_size[i] / grid.shape[i] for i in range(3)])
+    solid = (grid == SOLID).astype(np.float32)
+    pad = 1 if closed else 0
+    if closed:
+        solid = np.pad(solid, 1, mode="constant", constant_values=0.0)
+    if solid.min() == solid.max():
+        print("  [STL] Skipped — grid has no fluid/solid interface.")
+        return
+    verts, faces, _, _ = _mc(solid, level=0.5, spacing=tuple(h),
+                             allow_degenerate=False)
+    verts = verts + (0.5 - pad) * h          # index -> physical voxel-centre frame
 
-    # ── Optional: clean mesh via trimesh ─────────────────────────────────────
     if _HAS_TRIMESH:
         mesh = _trimesh.Trimesh(vertices=verts, faces=faces, process=True)
         mesh.export(filename)
-        if verbose:
-            print(f"  [STL-trimesh]  {filename!r}  "
-                  f"({len(mesh.faces)} triangles)")
-        return
-
-    # ── Minimal binary STL writer (no extra dependencies) ────────────────────
-    #   Binary STL format:
-    #     80-byte ASCII header
-    #     uint32  : number of triangles
-    #     For each triangle (50 bytes):
-    #         3 × float32 : normal vector
-    #         3 × 3 float32 : vertex coordinates
-    #         uint16 : attribute byte count (0)
-    n_tri = len(faces)
-    with open(filename, "wb") as fh:
-        # 80-byte header
-        fh.write(b"PALABOS voxel-to-STL export" + b" " * 53)
-        fh.write(struct.pack("<I", n_tri))
-        for tri_idx, face in enumerate(faces):
-            # normals from marching_cubes are per-vertex; compute per-face normal
-            v0, v1, v2 = verts[face[0]], verts[face[1]], verts[face[2]]
-            fn = np.cross(v1 - v0, v2 - v0)
-            fn_len = np.linalg.norm(fn)
-            fn = fn / fn_len if fn_len > 1e-12 else np.array([0., 0., 1.])
-            fh.write(struct.pack("<fff", float(fn[0]), float(fn[1]), float(fn[2])))
-            for v_idx in face:
-                fh.write(struct.pack("<fff", *verts[v_idx].tolist()))
-            fh.write(struct.pack("<H", 0))
-
+        n_tri = len(mesh.faces)
+    else:
+        tri = verts[faces].astype(np.float32)                 # (n, 3, 3)
+        nrm = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+        ln  = np.linalg.norm(nrm, axis=1, keepdims=True)
+        nrm = np.where(ln > 1e-20, nrm / np.maximum(ln, 1e-20), 0.0)
+        rec = np.zeros(len(tri), dtype=np.dtype([("n", "<f4", (3,)),
+                                                 ("v", "<f4", (3, 3)),
+                                                 ("a", "<u2")]))
+        rec["n"], rec["v"] = nrm, tri
+        n_tri = len(rec)
+        with open(filename, "wb") as fh:
+            fh.write(b"PorousGen voxel-to-STL export (solid phase)".ljust(80, b" "))
+            fh.write(struct.pack("<I", n_tri))
+            rec.tofile(fh)
     if verbose:
         size = os.path.getsize(filename) / 1024
-        print(f"  [STL]  {filename!r}  ({n_tri} triangles  {size:.0f} KB)")
+        print(f"  [STL]  {filename!r}  ({n_tri} triangles, "
+              f"{'watertight' if closed else 'open'}, {size:.0f} KB)")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -346,6 +387,8 @@ def generate_granular(
     max_attempts:     int    = 300_000,
     seed:             int    = 42,
     verbose:          bool   = True,
+    periodic:         bool   = False,
+    return_info:      bool   = False,
 ) -> np.ndarray:
     """
     GRANULAR POROUS MEDIUM — Random Sequential Addition (RSA) packing.
@@ -416,6 +459,18 @@ def generate_granular(
     Returns
     -------
     np.ndarray  int8   shape = `shape`    0 = fluid   1 = solid
+        Boundary treatment
+    ------------------
+    periodic=False (default): wall-confined packing - every particle lies
+        entirely inside the box. Expect a porosity excess in a layer about
+        one particle radius thick next to each face (the classical wall
+        effect of confined packings).
+    periodic=True: periodic RVE - centres anywhere in [0, L), minimum-image
+        overlap test, spheres that cross a face re-enter through the
+        opposite face. Requires 2*r < L on every axis.
+    Porosity is controlled indirectly (count and radii); the realised value
+    is reported, and a RuntimeWarning is raised if RSA jams before all
+    requested particles are placed.
     """
     ndim = len(shape)
     if domain_size is None:
@@ -442,6 +497,7 @@ def generate_granular(
         return float(rng.uniform(radius_min, radius_max))   # 'uniform'
 
     # ── Phase 1: RSA centre + radius placement ─────────────────────────────────
+    L_arr   = np.asarray(domain_size, dtype=float)
     centres = []   # list of np.ndarray, physical coordinates
     radii   = []   # list of float, accepted radius per particle
 
@@ -449,20 +505,29 @@ def generate_granular(
     for attempt in range(max_attempts):
         r_i = _draw_radius()
 
-        # Candidate drawn at least r_i from each wall so it fits inside
-        lo = np.full(ndim, r_i)
-        hi = np.array([domain_size[k] - r_i for k in range(ndim)])
-
-        if np.any(hi <= lo):
-            continue   # this particle (possibly large) doesn't fit — try another draw
-
-        c = rng.uniform(lo, hi)
+        if periodic:
+            # Periodic RVE: centre anywhere in [0, L); a sphere crossing a
+            # face re-enters through the opposite face.
+            if np.any(2.0 * r_i >= L_arr):
+                continue
+            c = rng.uniform(np.zeros(ndim), L_arr)
+        else:
+            # Wall-confined packing: candidate drawn at least r_i from each
+            # wall so the particle fits entirely inside the box.
+            lo = np.full(ndim, r_i)
+            hi = np.array([domain_size[k] - r_i for k in range(ndim)])
+            if np.any(hi <= lo):
+                continue   # this particle doesn't fit — try another draw
+            c = rng.uniform(lo, hi)
 
         # Hard-sphere overlap check, generalised to unequal radii
+        # (minimum-image separation when periodic)
         if centres:
             arr      = np.asarray(centres)             # (N, ndim)
             rarr     = np.asarray(radii)                # (N,)
             diffs    = arr - c[np.newaxis, :]
+            if periodic:
+                diffs -= L_arr * np.round(diffs / L_arr)
             dists    = np.sqrt((diffs**2).sum(axis=1))
             min_gaps = (rarr + r_i) * (1.0 - overlap_tol)
             if np.any(dists < min_gaps):
@@ -490,6 +555,22 @@ def generate_granular(
         coords_1d  = _voxel_centres(shape, domain_size)
 
         for c, r in zip(centres, radii):
+            if periodic:
+                # Index window around the sphere, wrapped onto the grid; the
+                # coordinate of each voxel is taken as its periodic image
+                # nearest to the centre.
+                idx, sub_axes = [], []
+                for k in range(ndim):
+                    a = int(np.floor((c[k] - r) / voxel_size[k])) - 1
+                    b = int(np.ceil ((c[k] + r) / voxel_size[k])) + 1
+                    raw = np.arange(a, b)
+                    idx.append(np.mod(raw, shape[k]))
+                    sub_axes.append((raw + 0.5) * voxel_size[k])
+                sub_mesh = np.meshgrid(*sub_axes, indexing="ij")
+                mask = sum((m - c[k])**2 for k, m in enumerate(sub_mesh)) <= r * r
+                grid[np.ix_(*idx)] = np.where(mask, SOLID, grid[np.ix_(*idx)])
+                continue
+
             # Voxel-index bounding box covering [c - r, c + r], padded by 1
             idx_lo, idx_hi = [], []
             for k in range(ndim):
@@ -511,7 +592,15 @@ def generate_granular(
             sub_grid[mask] = SOLID
             grid[region_slices] = sub_grid
 
-    return grid
+    info = dict(generator="granular", periodic=periodic,
+                particles_placed=len(centres), particles_requested=n_particles,
+                porosity_control="indirect (particle count and radii)")
+    if len(centres) < n_particles:
+        warnings.warn(f"generate_granular: only {len(centres)} of {n_particles} "
+                      f"particles placed in {max_attempts} RSA attempts "
+                      f"(jamming limit reached); porosity is higher than intended.",
+                      RuntimeWarning, stacklevel=2)
+    return (grid, info) if return_info else grid
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -565,73 +654,87 @@ def generate_fibrous(
     n_fibers:     int    = 100,
     seed:         int    = 7,
     verbose:      bool   = True,
+    porosity:     float  = None,
+    periodic:     bool   = False,
+    return_info:  bool   = False,
 ) -> np.ndarray:
     """
-    FIBROUS POROUS MEDIUM — Randomly oriented cylinders (3-D) / line segments (2-D).
+    FIBROUS POROUS MEDIUM — randomly oriented fibres: capsules (spherocylinders)
+    in 3-D, stadium-shaped segments in 2-D.
 
-    ┌────────────────────────────────────────────────────────────────────────┐
-    │                   Fibre Generation Algorithm                          │
-    │                                                                        │
-    │  For each fibre i = 1 … n_fibres:                                     │
-    │    1. Sample a random centre  c ~ Uniform(domain)                     │
-    │    2. Sample a random unit-direction vector  u:                        │
-    │         3-D: u = N(0, I₃) / |N(0, I₃)|   ← uniform on S²            │
-    │              (sampling from a 3-D Gaussian and normalising avoids     │
-    │               the polar-clustering bias of naïve azimuth sampling)    │
-    │         2-D: u = (cos θ, sin θ),  θ ~ Uniform[0, π)                  │
-    │    3. Endpoints:  p0 = c − (L/2)·u,   p1 = c + (L/2)·u              │
-    │                                                                        │
-    │  Rasterisation:                                                        │
-    │    For every voxel v, accumulate the minimum distance to all fibre    │
-    │    axes using  _dist_point_to_segment  (O(N_vox) per fibre).         │
-    │    Mark SOLID  if  min_i dist(v, fibre_i) ≤ fiber_radius             │
-    │    Fibres are allowed to extend beyond the domain boundary.           │
-    └────────────────────────────────────────────────────────────────────────┘
+    Algorithm
+    ---------
+    1. Draw n_fibers centres uniformly in the box and orientations uniformly
+       on the unit sphere (Gaussian-normalisation) or half-circle (2-D).
+    2. Build the distance from every voxel centre to the nearest fibre axis
+       segment. Each fibre is evaluated only inside its own bounding box
+       (O(box) per fibre, not O(grid)).
+    3. Solid where distance <= fiber_radius   (porosity=None, default), or
+       COUNT SELECTION: the k = round((1-phi)*N) voxels closest to any fibre
+       axis become solid (porosity given). All fibres then share one
+       effective radius r* chosen so that the porosity is exact; the fibre
+       SHAPE (capsule of uniform radius) is unchanged.
 
     Parameters
     ----------
-    fiber_radius : cross-sectional radius of each cylinder [m]
-    fiber_length : full axial length of each cylinder [m]
-    n_fibers     : number of fibres to place (overlaps allowed)
+    fiber_radius : cross-sectional radius [m] (initial guess when porosity set)
+    fiber_length : full axial length of each fibre [m]
+    n_fibers     : number of fibres (overlaps allowed)
+    porosity     : if given, honoured EXACTLY by count selection
+    periodic     : False (default) - fibres crossing a face are clipped.
+                   True  - periodic RVE: every periodic image of each fibre
+                   is included, so a fibre leaving through one face re-enters
+                   through the opposite face (exact for any fibre length).
+    return_info  : also return a dict incl. the effective radius r*.
     """
     ndim = len(shape)
     if domain_size is None:
         domain_size = tuple(1.0 for _ in shape)
 
-    rng     = np.random.default_rng(seed)
-    mesh    = _meshgrid(shape, domain_size)
-    pts     = _flat_pts(mesh)                    # (N_vox, ndim)
-    min_d   = np.full(pts.shape[0], np.inf)     # running minimum distance
-
+    rng  = np.random.default_rng(seed)
+    segs = []
     for _ in range(n_fibers):
-        # ── Random fibre centre (can be anywhere in domain) ───────────────────
         c = np.array([rng.uniform(0.0, domain_size[i]) for i in range(ndim)])
-
-        # ── Random orientation (uniform on sphere / half-circle) ──────────────
         if ndim == 2:
             theta = rng.uniform(0.0, np.pi)
             u     = np.array([np.cos(theta), np.sin(theta)])
         else:
-            # Uniformly distributed on S² via Gaussian normalisation trick
             raw = rng.standard_normal(3)
             u   = raw / (np.linalg.norm(raw) + 1e-20)
+        half = (fiber_length / 2.0) * u
+        segs.append((c - half, c + half))
 
-        # ── Endpoints: half-length on each side of the centre ─────────────────
-        half  = (fiber_length / 2.0) * u
-        p0, p1 = c - half, c + half
+    h = float(np.mean(C.voxel_size(shape, domain_size)))
+    info = dict(generator="fibrous", periodic=periodic, n_fibers=n_fibers)
 
-        # ── Update per-voxel minimum distance ─────────────────────────────────
-        d_seg = _dist_point_to_segment(pts, p0, p1)
-        np.minimum(min_d, d_seg, out=min_d)
+    if porosity is None:
+        dist = C.segment_distance_field(shape, domain_size, segs,
+                                        reach=fiber_radius, periodic=periodic)
+        solid = dist <= fiber_radius
+        info.update(porosity_control="indirect (fibre count and radius)",
+                    fiber_radius=fiber_radius)
+    else:
+        k = C.solid_count(porosity, int(np.prod(shape)))
+        reach = max(2.0 * fiber_radius, 2.0 * h)
+        diag = float(np.linalg.norm(domain_size))
+        while True:
+            dist = C.segment_distance_field(shape, domain_size, segs,
+                                            reach=reach, periodic=periodic)
+            if k == 0 or C.kth_smallest(dist, k) <= reach or reach > diag:
+                break
+            reach *= 2.0            # threshold lies beyond the evaluated band
+        solid = C.select_k_smallest(dist, k, seed=seed)
+        r_eff = C.kth_smallest(dist, k) if k > 0 else 0.0
+        info.update(porosity_control="exact", fiber_radius_effective=r_eff)
 
-    grid = np.full(shape, FLUID, dtype=np.int8)
-    grid.ravel()[min_d <= fiber_radius] = SOLID
-
+    grid = np.where(solid, SOLID, FLUID).astype(np.int8)
     if verbose:
         phi = compute_porosity(grid)
-        print(f"  Fibrous: {n_fibers} fibres placed,  φ = {phi:.4f}")
-
-    return grid
+        extra = (f", r* = {info['fiber_radius_effective']:.4g}"
+                 if porosity is not None else "")
+        print(f"  Fibrous: {n_fibers} fibres,  φ = {phi:.4f}{extra}"
+              f"  ({'periodic' if periodic else 'non-periodic'})")
+    return (grid, info) if return_info else grid
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -646,6 +749,8 @@ def generate_cellular(
     target_porosity: float = None,   # if set, overrides wall_thickness
     seed:           int    = 13,
     verbose:        bool   = True,
+    periodic:       bool   = False,
+    return_info:    bool   = False,
 ) -> np.ndarray:
     """
     CELLULAR POROUS MEDIUM — Voronoi-tessellation open-cell foam.
@@ -672,6 +777,17 @@ def generate_cellular(
     ----------
     n_seeds        : number of foam cells (bubbles / pores)
     wall_thickness : physical thickness of the solid struts / walls [m]
+    target_porosity: if given, walls are grown to EXACTLY this porosity
+    periodic       : False (default) - free boundaries: seeds are ordinary
+                     points in the box and a domain face is never treated
+                     as a cell wall by itself.
+                     True - periodic RVE: toroidal nearest-seed distances
+                     (cKDTree boxsize), wrap-around wall detection, periodic
+                     dilation and periodic distance field; the geometry
+                     tiles seamlessly.
+                     (v1.0 mixed the two: non-periodic seeds with wrap-around
+                     wall detection, which created spurious walls on faces.)
+    return_info    : also return a dict of realised generation parameters
     """
     ndim = len(shape)
     if domain_size is None:
@@ -679,53 +795,45 @@ def generate_cellular(
 
     rng = np.random.default_rng(seed)
 
-    # ── Step 1: Random seed points ────────────────────────────────────────────
+    # ── Step 1: Random seed points (in [0, L) on every axis) ─────────────────
     seeds = np.column_stack([
         rng.uniform(0.0, domain_size[i], n_seeds) for i in range(ndim)
     ])
 
-    # ── Step 2: Voronoi cell assignment via KD-tree ────────────────────────────
-    # Each voxel belongs to the Voronoi cell of its nearest seed.
-    mesh       = _meshgrid(shape, domain_size)
-    pts        = _flat_pts(mesh)                         # (N_vox, ndim)
-    tree       = cKDTree(seeds)
-    _, cell_id = tree.query(pts, k=1, workers=-1)       # (N_vox,)
-    cell_grid  = cell_id.reshape(shape)                  # label per voxel
+    # ── Step 2: Voronoi cell label per voxel (nearest seed) ──────────────────
+    # Chunked KD-tree query; toroidal distances when periodic.
+    cell_grid = C.query_nearest(seeds, shape, domain_size, k=1,
+                                periodic=periodic, want="index")
 
-    # ── Step 3: Detect Voronoi cell boundaries ────────────────────────────────
-    # A voxel is on a wall ⟺ at least one face-adjacent neighbour has a
-    # different cell label.  np.roll gives periodic neighbour access.
-    on_wall = np.zeros(shape, dtype=bool)
-    for axis in range(ndim):
-        on_wall |= np.roll(cell_grid,  1, axis=axis) != cell_grid
-        on_wall |= np.roll(cell_grid, -1, axis=axis) != cell_grid
+    # ── Step 3: Cell boundaries, with the SAME convention as Step 2 ─────────
+    on_wall = C.label_boundaries(cell_grid, periodic=periodic)
+    del cell_grid
 
     # ── Step 4: Wall thickness — physical value OR exact porosity target ──────
-    mean_vox  = np.mean([domain_size[i] / shape[i] for i in range(ndim)])
+    mean_vox = np.mean([domain_size[i] / shape[i] for i in range(ndim)])
     if target_porosity is not None:
-        # EXACT porosity control: thicken the one-voxel Voronoi faces by
-        # thresholding the Euclidean distance-to-wall field at the quantile
-        # that leaves exactly `target_porosity` of the voxels fluid.
-        from scipy.ndimage import distance_transform_edt
-        dist = distance_transform_edt(~on_wall)
-        wall = _solidify_to_porosity(dist, target_porosity, seed=seed)
+        k = C.solid_count(target_porosity, on_wall.size)
+        dist = C.distance_to_feature(on_wall, periodic=periodic, k_needed=k)
+        wall = C.select_k_smallest(dist, k, seed=seed)
         n_dilate = -1   # marker: porosity-driven
     else:
-        n_dilate  = max(1, int(round(wall_thickness / mean_vox)))
-        struct    = np.ones(tuple(3 for _ in range(ndim)), dtype=bool)
-        wall      = on_wall.copy()
-        for _ in range(n_dilate):
-            wall = binary_dilation(wall, structure=struct)
+        n_dilate = max(1, int(round(wall_thickness / mean_vox)))
+        wall = C.dilate_voxels(on_wall, n_dilate, periodic=periodic)
 
     grid = np.where(wall, SOLID, FLUID).astype(np.int8)
 
+    info = dict(generator="cellular", periodic=periodic, n_seeds=n_seeds,
+                porosity_control="exact" if target_porosity is not None
+                else "geometric (wall_thickness)")
+    if n_dilate > 0:
+        info["wall_dilations_vox"] = n_dilate
     if verbose:
         phi = compute_porosity(grid)
         mode = (f"target φ={target_porosity}" if target_porosity is not None
                 else f"wall = {n_dilate} vox")
-        print(f"  Cellular: {n_seeds} cells,  {mode},  φ = {phi:.4f}")
-
-    return grid
+        print(f"  Cellular: {n_seeds} cells,  {mode},  "
+              f"{'periodic' if periodic else 'non-periodic'},  φ = {phi:.4f}")
+    return (grid, info) if return_info else grid
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -740,6 +848,8 @@ def generate_consolidated(
     orient_bounds:  tuple  = (15.0, 75.0),
     seed:           int    = 21,
     verbose:        bool   = True,
+    porosity:       float  = None,
+    return_info:    bool   = False,
 ) -> np.ndarray:
     """
     CONSOLIDATED (FRACTURED) POROUS MEDIUM — solid matrix with random fractures.
@@ -771,53 +881,55 @@ def generate_consolidated(
     n_fractures    : number of discrete fractures to carve
     fracture_width : full aperture of each fracture [m]  (half = width / 2)
     orient_bounds  : (min_dip°, max_dip°) dip angle range from horizontal
+    porosity       : if given, honoured EXACTLY: the round(phi*N) voxels
+                     closest to any fracture plane become fluid (all
+                     fractures share one effective aperture).
+    Boundary treatment: non-periodic only. Fractures are infinite planes
+    of arbitrary orientation; a plane is periodic-compatible only for
+    orientations commensurate with the box, so no periodic mode is offered.
+    return_info    : also return a dict incl. the effective aperture.
     """
     ndim = len(shape)
     if domain_size is None:
         domain_size = tuple(1.0 for _ in shape)
 
     rng   = np.random.default_rng(seed)
-    mesh  = _meshgrid(shape, domain_size)
-    pts   = _flat_pts(mesh)                             # (N_vox, ndim)
-    half  = fracture_width / 2.0
-
     th_lo = np.radians(orient_bounds[0])
     th_hi = np.radians(orient_bounds[1])
 
-    # Begin from a fully solid matrix
-    grid = np.full(shape, SOLID, dtype=np.int8)
-
+    planes = []
     for _ in range(n_fractures):
-        # ── Random fracture centre ────────────────────────────────────────────
         c = np.array([rng.uniform(0.0, domain_size[i]) for i in range(ndim)])
-
-        # ── Random fracture normal (unit vector within orientation bounds) ─────
         if ndim == 2:
             theta  = rng.uniform(th_lo, th_hi)
             normal = np.array([np.sin(theta), np.cos(theta)])
         else:
             theta  = rng.uniform(th_lo, th_hi)      # dip from horizontal
-            phi    = rng.uniform(0.0, 2.0 * np.pi)  # strike azimuth
-            normal = np.array([
-                np.sin(theta) * np.cos(phi),
-                np.sin(theta) * np.sin(phi),
-                np.cos(theta),
-            ])
+            phi_s  = rng.uniform(0.0, 2.0 * np.pi)  # strike azimuth
+            normal = np.array([np.sin(theta) * np.cos(phi_s),
+                               np.sin(theta) * np.sin(phi_s),
+                               np.cos(theta)])
+        normal /= np.linalg.norm(normal) + 1e-20
+        planes.append((c, normal))
 
-        normal /= np.linalg.norm(normal) + 1e-20     # ensure unit vector
-
-        # ── Point-to-plane distance ───────────────────────────────────────────
-        # For a plane with unit normal n̂ passing through centre c,
-        # the signed distance from a point v is:  (v - c) · n̂
-        # The fracture occupies the slab  |dist| ≤ aperture / 2
-        signed_dist = (pts - c) @ normal             # (N_vox,)
-        grid.ravel()[np.abs(signed_dist) <= half] = FLUID
+    # Distance to the nearest fracture plane, by broadcasting (no N x ndim array)
+    dist = C.plane_distance_field(shape, domain_size, planes)
+    info = dict(generator="consolidated", periodic=False, n_fractures=n_fractures)
+    if porosity is None:
+        fluid = dist <= fracture_width / 2.0
+        info.update(porosity_control="indirect (fracture count and aperture)")
+    else:
+        # fluid = the round(phi N) voxels closest to a plane
+        #       = complement of the k solid voxels farthest from every plane
+        solid = C.select_k_smallest(-dist, C.solid_count(porosity, dist.size), seed=seed)
+        fluid = ~solid
+        a_eff = 2.0 * float(dist[fluid].max()) if fluid.any() else 0.0
+        info.update(porosity_control="exact", fracture_width_effective=a_eff)
+    grid = np.where(fluid, FLUID, SOLID).astype(np.int8)
 
     if verbose:
-        phi = compute_porosity(grid)
-        print(f"  Consolidated: {n_fractures} fractures,  φ = {phi:.4f}")
-
-    return grid
+        print(f"  Consolidated: {n_fractures} fractures,  φ = {compute_porosity(grid):.4f}")
+    return (grid, info) if return_info else grid
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -856,52 +968,15 @@ def _gyroid_value(
           + np.sin(kZ) * np.cos(kX))
 
 
-def _find_gyroid_threshold(
-    target_porosity: float,
-    L_cell:          float,
-    mode:            str   = "3d",
-    n_sample:        int   = 256,
-) -> float:
-    """
-    Binary-search for the Gyroid iso-surface threshold t that achieves a
-    given target porosity.
-
-    Classification:  FLUID where G < t   →   higher t = more fluid = higher φ.
-
-    A fine regular grid is used to estimate the CDF of G values, then
-    binary search finds t such that  P(G < t) ≈ target_porosity.
-
-    mode : '3d' evaluates the full Gyroid;  '2d' uses the z = 0 cross-section.
-    """
-    x  = np.linspace(0, 4.0 * L_cell, n_sample, endpoint=False)
-
-    if mode == "3d":
-        X, Y, Z = np.meshgrid(x, x, x, indexing="ij")
-        G_all   = _gyroid_value(X, Y, Z, L_cell).ravel()
-    else:
-        # 2-D cross-section at z = 0:  sin(kx)cos(ky) + sin(ky)·1 + 0
-        X2, Y2  = np.meshgrid(x, x, indexing="ij")
-        k       = 2.0 * np.pi / L_cell
-        G_all   = (np.sin(k * X2) * np.cos(k * Y2)
-                 + np.sin(k * Y2)).ravel()
-
-    lo, hi = float(G_all.min()), float(G_all.max())
-    for _ in range(64):                              # 64 iterations ≈ 54-bit precision
-        mid = 0.5 * (lo + hi)
-        if np.mean(G_all < mid) < target_porosity:
-            lo = mid
-        else:
-            hi = mid
-    return 0.5 * (lo + hi)
-
-
 def generate_ordered_gyroid(
     shape:           tuple  = (96, 96, 96),
     domain_size:     tuple  = None,
     n_cells:         int    = 4,
     threshold:       float  = None,
     target_porosity: float  = 0.50,
+    seed:            int    = 0,
     verbose:         bool   = True,
+    return_info:     bool   = False,
 ) -> np.ndarray:
     """
     ORDERED POROUS MEDIUM — Gyroid Triply Periodic Minimal Surface (TPMS).
@@ -917,8 +992,11 @@ def generate_ordered_gyroid(
     │     FLUID  ⟺  G(x, y, z) < threshold  t                             │
     │     SOLID  ⟺  G(x, y, z) ≥ threshold  t                             │
     │                                                                        │
-    │   If threshold is None, a binary search finds the value of t that     │
-    │   achieves target_porosity for the given grid and cell count.         │
+    │   If threshold is None, the EXACT number of fluid voxels needed for   │
+    │   target_porosity is selected directly on this grid's own G field     │
+    │   via _solidify_to_porosity (rank-selection with a random tie-break,  │
+    │   not a threshold estimated on a separate calibration grid) -- see    │
+    │   the note below for why that distinction matters.                   │
     │                                                                        │
     │   2-D variant: cross-section at z = 0                                │
     │     G_2D(x,y) = sin(kx)·cos(ky) + sin(ky)                           │
@@ -928,8 +1006,45 @@ def generate_ordered_gyroid(
     Parameters
     ----------
     n_cells         : number of complete Gyroid unit cells along each axis
-    threshold       : iso-surface level t.  None → auto from target_porosity.
-    target_porosity : target void fraction  (only used when threshold is None)
+    threshold       : iso-surface level t. None -> exact-porosity mode (below).
+    target_porosity : target void fraction (only used when threshold is None)
+    seed            : tie-break seed for the exact-porosity selection. The
+                      Gyroid FIELD itself is fully deterministic; this seed
+                      only resolves ties between voxels that land on
+                      (near-)identical G values, which occur often enough on
+                      a discretised trigonometric field that they cannot be
+                      ignored -- see the note below. Same inputs, same seed
+                      -> same output, every time.
+
+    Boundary treatment
+    ------------------
+    The Gyroid is intrinsically periodic with period L_cell =
+    domain_size[0] / n_cells on every axis. The generated grid is exactly
+    periodic along axis i when domain_size[i] / L_cell is an integer (always
+    true for a cubic box); otherwise the structure is cut mid-cell on that
+    axis. No `periodic` switch is needed; the realised per-axis periodicity
+    is reported in the info dict and a warning is issued if any axis is cut.
+    return_info     : also return a dict of realised generation parameters.
+
+    Note on exact porosity
+    -----------------------
+    Earlier versions of this function estimated the threshold t on a
+    SEPARATE, fixed-size calibration grid (independent of the caller's
+    requested shape/domain/n_cells), then applied that single scalar t to
+    the real field with a plain G < t comparison. Because the calibration
+    grid and the real grid are different discretisations of the same
+    continuous field, the achieved porosity on the real grid could differ
+    from the target by far more than one voxel -- worse at low resolution,
+    where G takes on many repeated or near-repeated values ("tie
+    plateaus") that a scalar threshold cannot split predictably.
+    generate_cellular/_solidify_to_porosity never had this problem because
+    they always select the target vote count directly from the ACTUAL
+    field being classified. Auto mode below does the same for Gyroid: G is
+    evaluated once, on the real grid, and exactly
+    round(target_porosity * N) voxels -- the N with the smallest G, i.e.
+    the correct polarity for "FLUID where G < t" -- are marked fluid by
+    rank, with ties broken by an infinitesimal random perturbation rather
+    than left to floating-point comparison order.
     """
     ndim = len(shape)
     if domain_size is None:
@@ -937,35 +1052,53 @@ def generate_ordered_gyroid(
 
     # Unit-cell period: n_cells complete cycles fit in domain_size[0]
     L_cell = domain_size[0] / n_cells
+    k_wave = 2.0 * np.pi / L_cell
 
-    # Coordinate arrays
-    coords = _voxel_centres(shape, domain_size)
-
+    # Broadcast 1-D coordinate axes instead of full meshgrids (memory: one
+    # grid-sized float array instead of ndim + 1 of them).
+    ax = C.broadcast_axes(C.voxel_centres(shape, domain_size))
     if ndim == 2:
-        X, Y = np.meshgrid(*coords, indexing="ij")
-        k    = 2.0 * np.pi / L_cell
-        G    = np.sin(k * X) * np.cos(k * Y) + np.sin(k * Y)
-
-        if threshold is None:
-            threshold = _find_gyroid_threshold(
-                target_porosity, L_cell, mode="2d", n_sample=512)
+        X, Y = ax
+        G = np.sin(k_wave * X) * np.cos(k_wave * Y)
+        G = G + np.sin(k_wave * Y)
     else:
-        X, Y, Z = np.meshgrid(*coords, indexing="ij")
-        G       = _gyroid_value(X, Y, Z, L_cell)
+        X, Y, Z = ax
+        G = (np.sin(k_wave * X) * np.cos(k_wave * Y)     # first sum allocates
+             + np.sin(k_wave * Y) * np.cos(k_wave * Z))   # the full grid
+        G += np.sin(k_wave * Z) * np.cos(k_wave * X)
 
-        if threshold is None:
-            threshold = _find_gyroid_threshold(
-                target_porosity, L_cell, mode="3d", n_sample=256)
+    if threshold is not None:
+        # Explicit iso-surface level requested: honoured as given. No
+        # exact-porosity guarantee is implied in this mode.
+        grid = np.where(G < threshold, FLUID, SOLID).astype(np.int8)
+        display_threshold = threshold
+    else:
+        # Exact-porosity mode: rank-select on the REAL field. FLUID is the
+        # smallest-G voxels, i.e. SOLID = the k largest G = k smallest (-G).
+        k = C.solid_count(target_porosity, G.size)
+        solid = C.select_k_smallest(-G, k, seed=seed)
+        grid  = np.where(solid, SOLID, FLUID).astype(np.int8)
+        display_threshold = (C.kth_smallest(-G, k) * -1.0) if k > 0 else float(G.max())
 
-    # Classify: fluid where G < t, solid where G ≥ t
-    grid = np.where(G < threshold, FLUID, SOLID).astype(np.int8)
-
+    cells_per_axis = [domain_size[i] / L_cell for i in range(ndim)]
+    periodic_axes  = [bool(abs(c - round(c)) < 1e-9 and round(c) >= 1)
+                      for c in cells_per_axis]
+    if not all(periodic_axes):
+        warnings.warn("generate_ordered_gyroid: the box does not hold a whole "
+                      "number of unit cells on every axis "
+                      f"(cells per axis = {[round(c, 4) for c in cells_per_axis]}); "
+                      "the structure is not periodic on the cut axes.",
+                      RuntimeWarning, stacklevel=2)
+    info = dict(generator="gyroid", periodic=all(periodic_axes),
+                periodic_axes=periodic_axes, cell_length=L_cell,
+                iso_level=float(display_threshold),
+                porosity_control="exact" if threshold is None else "iso-level")
     if verbose:
         phi = compute_porosity(grid)
-        print(f"  Gyroid: L={L_cell:.4f} m,  t={threshold:.4f},  "
-              f"{n_cells} cells/axis,  φ = {phi:.4f}")
-
-    return grid
+        print(f"  Gyroid: L={L_cell:.4f} m,  t~{display_threshold:.4f},  "
+              f"{n_cells} cells/axis,  φ = {phi:.4f},  "
+              f"periodic={'yes' if all(periodic_axes) else periodic_axes}")
+    return (grid, info) if return_info else grid
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1400,6 +1533,8 @@ def generate_open_foam(
     n_cells:      int   = 6,        # foam cells per axis (fineness / ~PPI)
     seed:         int   = 42,
     verbose:      bool  = True,
+    periodic:     bool  = False,
+    return_info:  bool  = False,
 ) -> np.ndarray:
     """
     OPEN-CELL FOAM — the strut (EDGE) network of a Voronoi tessellation.
@@ -1412,18 +1547,21 @@ def generate_open_foam(
     Algorithm
     ---------
     1. Scatter n_cells**ndim jittered seed points (one per foam cell).
-    2. For every voxel query the 1st and 3rd nearest seeds (cKDTree).
+    2. For every voxel query the 1st and 3rd nearest seeds (chunked cKDTree).
        A voxel lies near a cell EDGE when d3 - d1 is small (3+ cells meet).
-    3. Take the thinnest edge skeleton (smallest d3-d1 quantile), then thicken
-       it by thresholding the Euclidean distance-to-skeleton field at the
-       quantile that leaves EXACTLY `porosity` of the voxels fluid.
+    3. Take the thinnest edge skeleton (smallest 2 % of d3 - d1).
+    4. Grow the struts by COUNT SELECTION on the Euclidean distance-to-
+       skeleton field: exactly k = round((1-phi)*N) voxels become solid.
 
     Parameters
     ----------
-    porosity : open volume fraction — honoured exactly (quantile threshold).
+    porosity : open volume fraction — honoured exactly (count selection).
     n_cells  : cells per axis; higher = finer struts (more ligaments).
+    periodic : False (default) free boundaries; True = periodic RVE
+               (toroidal seed distances and periodic distance field).
+               The jittered seed lattice is itself periodic-compatible.
+    return_info : also return a dict of realised generation parameters.
     """
-    from scipy.ndimage import distance_transform_edt
     ndim = len(shape)
     if domain_size is None:
         domain_size = tuple(1.0 for _ in shape)
@@ -1435,20 +1573,24 @@ def generate_open_foam(
     seeds = np.stack(np.meshgrid(*axes, indexing="ij"), -1).reshape(-1, ndim)
     seeds += rng.uniform(-0.35, 0.35, seeds.shape) * (domain_size[0] / n_cells)
 
-    mesh = _meshgrid(shape, domain_size)
-    pts  = _flat_pts(mesh)
-    d, _ = cKDTree(seeds).query(pts, k=3, workers=-1)
-    edge_metric = (d[:, 2] - d[:, 0]).reshape(shape)     # small near edges
-
+    edge_metric = C.query_nearest(                        # small near edges
+        seeds, shape, domain_size, k=3, periodic=periodic,
+        reduce=lambda d: d[:, 2] - d[:, 0])
     skeleton = edge_metric <= np.quantile(edge_metric, 0.02)
-    dist = distance_transform_edt(~skeleton)
-    solid = _solidify_to_porosity(dist, porosity, seed=seed)
+    del edge_metric
 
+    k = C.solid_count(porosity, skeleton.size)
+    dist = C.distance_to_feature(skeleton, periodic=periodic, k_needed=k)
+    solid = C.select_k_smallest(dist, k, seed=seed)
     grid = np.where(solid, SOLID, FLUID).astype(np.int8)
+
+    info = dict(generator="open_foam", periodic=periodic,
+                n_cells_total=len(seeds), porosity_control="exact")
     if verbose:
         print(f"  Open foam: {len(seeds)} cells,  target φ={porosity:.3f}"
-              f"  ->  φ = {compute_porosity(grid):.4f}")
-    return grid
+              f"  ->  φ = {compute_porosity(grid):.4f}"
+              f"  ({'periodic' if periodic else 'non-periodic'})")
+    return (grid, info) if return_info else grid
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1461,32 +1603,75 @@ def generate_blob(
     correlation_length: float = 0.08,   # blob size, in domain units
     seed:               int   = 7,
     verbose:            bool  = True,
+    periodic:           bool  = False,
+    return_info:        bool  = False,
 ) -> np.ndarray:
     """
     STOCHASTIC POROUS MEDIUM — thresholded Gaussian random field ("blobs").
 
     The standard stochastic-reconstruction benchmark (soils, sandstones,
     membranes): white noise is smoothed with a Gaussian kernel of width
-    `correlation_length`, and the field is thresholded at the quantile that
-    yields EXACTLY the requested porosity. The correlation length sets the
-    characteristic blob / pore size.
+    `correlation_length` (sets the characteristic blob / pore size), and the
+    (1-phi) fraction of voxels with the LARGEST field values is made solid
+    by COUNT SELECTION - exactly k = round((1-phi)*N) solid voxels.
+
+    Boundary treatment
+    ------------------
+    periodic=True  : noise smoothed with wrap-around (mode="wrap"); the
+                     field is exactly periodic and the geometry tiles
+                     seamlessly. This is the v1.0 behaviour.
+    periodic=False : (default) non-periodic but STATISTICALLY STATIONARY up
+                     to the faces: the noise is drawn on a box padded by 3
+                     standard deviations of the kernel and the smoothed
+                     field is cropped back. (Reflect/mirror padding is
+                     avoided on purpose: near a mirror plane each noise
+                     sample is counted twice, which inflates the field
+                     variance there and biases the local porosity.)
+                     Memory is higher than periodic mode when the
+                     correlation length is a sizeable fraction of the box.
     """
     from scipy.ndimage import gaussian_filter
     ndim = len(shape)
     if domain_size is None:
         domain_size = tuple(1.0 for _ in shape)
     rng = np.random.default_rng(seed)
-
-    noise = rng.standard_normal(shape)
     sigma = [correlation_length / (domain_size[i] / shape[i]) for i in range(ndim)]
-    field = gaussian_filter(noise, sigma=sigma, mode="wrap")
 
-    solid = field > np.quantile(field, porosity)         # exact porosity
-    grid  = np.where(solid, SOLID, FLUID).astype(np.int8)
+    if correlation_length > 0.5 * min(domain_size):
+        warnings.warn(f"generate_blob: correlation_length={correlation_length} is "
+                      f"more than half the smallest box edge ({min(domain_size)}); "
+                      "correlation_length is in the same (absolute) units as "
+                      "domain_size, so blobs will be larger than the box.",
+                      RuntimeWarning, stacklevel=2)
+    if periodic:
+        noise = rng.standard_normal(shape)
+        field = gaussian_filter(noise, sigma=sigma, mode="wrap")
+    else:
+        truncate = 3.0
+        # Padding of 3 kernel sigmas makes the cropped field stationary. It is
+        # capped at half the box per side (<= 8x memory in 3-D): a kernel that
+        # wide means blobs larger than the box, which is warned about above.
+        pad = [min(int(np.ceil(truncate * sg)), n // 2 + 1)
+               for sg, n in zip(sigma, shape)]
+        noise = rng.standard_normal([n + 2 * p for n, p in zip(shape, pad)],
+                                    dtype=np.float32)
+        field = gaussian_filter(noise, sigma=sigma, mode="wrap",
+                                truncate=truncate, output=np.float32)
+        field = field[tuple(slice(p, p + n) for p, n in zip(pad, shape))]
+    del noise
+
+    # largest field values -> solid  ==  smallest (-field) -> solid
+    solid = C.select_k_smallest(-field, C.solid_count(porosity, field.size),
+                                seed=seed)
+    grid = np.where(solid, SOLID, FLUID).astype(np.int8)
+
+    info = dict(generator="blob", periodic=periodic, porosity_control="exact",
+                kernel_sigma_vox=[round(float(x), 3) for x in sigma])
     if verbose:
         print(f"  Blobs: corr={correlation_length},  target φ={porosity:.3f}"
-              f"  ->  φ = {compute_porosity(grid):.4f}")
-    return grid
+              f"  ->  φ = {compute_porosity(grid):.4f}"
+              f"  ({'periodic' if periodic else 'non-periodic'})")
+    return (grid, info) if return_info else grid
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1496,51 +1681,65 @@ def generate_overlapping_spheres(
     shape:        tuple = (96, 96, 96),
     domain_size:  tuple = None,
     porosity:     float = 0.55,
-    radius:       float = 0.07,     # sphere radius, in domain units
+    radius:       float = 0.07,     # nominal sphere radius, in domain units
     seed:         int   = 11,
     verbose:      bool  = True,
+    periodic:     bool  = False,
+    return_info:  bool  = False,
 ) -> np.ndarray:
     """
     BOOLEAN (overlapping-spheres) MODEL — freely inter-penetrating spheres.
 
     The classic "Swiss-cheese" stochastic medium: sphere centres follow a
-    Poisson process and spheres may overlap, producing consolidated-looking
-    solids. Spheres are added one by one until the measured porosity drops
-    to the target (last sphere included only if it improves the match), so
-    the requested porosity is honoured to within a fraction of one sphere.
+    Poisson point process and spheres may overlap, producing consolidated-
+    looking solids.
+
+    Algorithm (v1.1)
+    ----------------
+    1. Number of spheres from the Boolean-model relation
+           phi = exp(-lambda * v_sph)   ->   n = -ln(phi) * V_w / v_sph
+       with the nominal `radius`, so the expected porosity is the target.
+    2. Centres uniform in the sampling window V_w: the box itself when
+       periodic, otherwise the box grown by 1.5 radii on every side, so that
+       spheres centred just outside also cut into the box (the correct
+       window sampling of a Boolean model - no porosity excess near faces).
+    3. Distance from every voxel to the nearest centre (chunked KD-tree,
+       toroidal when periodic); COUNT SELECTION makes exactly
+       k = round((1-phi)*N) voxels solid. The result is a union of equal
+       spheres of one effective radius r* (reported), close to `radius`.
+
+    Porosity is therefore EXACT. (v1.0 added spheres one at a time until the
+    porosity crossed the target; the overshoot could exceed one sphere and
+    each addition cost a full-grid pass.)
     """
     ndim = len(shape)
     if domain_size is None:
         domain_size = tuple(1.0 for _ in shape)
-    rng   = np.random.default_rng(seed)
-    mesh  = _meshgrid(shape, domain_size)
-    solid = np.zeros(shape, dtype=bool)
-    total = solid.size
-    target_solid = 1.0 - porosity
+    rng = np.random.default_rng(seed)
+    L   = np.asarray(domain_size, dtype=float)
 
-    # Poisson estimate of how many spheres are needed:  φ = exp(-n·v/V)
-    v_sph = (np.pi * radius**2 if ndim == 2
-             else 4.0 / 3.0 * np.pi * radius**3)
-    V     = float(np.prod(domain_size))
-    n_est = max(4, int(-np.log(max(porosity, 1e-6)) * V / v_sph * 1.15))
+    v_sph  = (np.pi * radius**2 if ndim == 2 else 4.0 / 3.0 * np.pi * radius**3)
+    margin = 0.0 if periodic else 1.5 * radius
+    lo, hi = -margin * np.ones(ndim), L + margin
+    V_w    = float(np.prod(hi - lo))
+    n      = max(1, int(round(-np.log(max(porosity, 1e-12)) * V_w / v_sph)))
+    centres = rng.uniform(lo, hi, size=(n, ndim))
 
-    for i in range(n_est * 3):
-        c = [rng.uniform(0, domain_size[k]) for k in range(ndim)]
-        d2 = sum((mesh[k] - c[k]) ** 2 for k in range(ndim))
-        new = solid | (d2 <= radius * radius)
-        frac_new = new.sum() / total
-        if abs(frac_new - target_solid) >= abs(solid.sum()/total - target_solid) \
-           and solid.sum()/total >= target_solid * 0.98:
-            break
-        solid = new
-        if frac_new >= target_solid:
-            break
-
+    k = C.solid_count(porosity, int(np.prod(shape)))
+    dist = C.query_nearest(centres, shape, domain_size, k=1, periodic=periodic)
+    solid = C.select_k_smallest(dist, k, seed=seed)
+    r_eff = C.kth_smallest(dist, k) if k > 0 else 0.0
     grid = np.where(solid, SOLID, FLUID).astype(np.int8)
+
+    info = dict(generator="overlapping_spheres", periodic=periodic,
+                n_spheres=n, radius_nominal=radius, radius_effective=r_eff,
+                porosity_control="exact")
     if verbose:
-        print(f"  Overlapping spheres: r={radius},  target φ={porosity:.3f}"
-              f"  ->  φ = {compute_porosity(grid):.4f}")
-    return grid
+        print(f"  Overlapping spheres: {n} spheres, r*={r_eff:.4g} "
+              f"(nominal {radius}),  target φ={porosity:.3f}"
+              f"  ->  φ = {compute_porosity(grid):.4f}"
+              f"  ({'periodic' if periodic else 'non-periodic'})")
+    return (grid, info) if return_info else grid
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1553,6 +1752,8 @@ def write_info_file(
     domain_size: tuple = None,
     params:      dict  = None,
     dat_name:    str   = "",
+    info:        dict  = None,
+    metrics:     dict  = None,
 ) -> str:
     """Human-readable geometry report with ready-to-paste PALABOS XML blocks."""
     shape = grid.shape
@@ -1565,7 +1766,7 @@ def write_info_file(
     A = L.append
     A("=" * 66)
     A("  PorousGen — Geometry Report")
-    A(f"  generated by porous_media_generator v{__version__}")
+    A(f"  generated by PorousGen v{__version__}")
     A("  " + time.strftime("%Y-%m-%d %H:%M:%S"))
     A("=" * 66)
     A("")
@@ -1574,7 +1775,8 @@ def write_info_file(
     for n, s in zip(names, shape):
         A(f"  {n:<4}: {s}")
     A(f"  total voxels : {grid.size:,}")
-    A(f"  porosity     : {phi:.4f}   [fluid / total]")
+    A(f"  fluid voxels : {int(np.sum(grid == FLUID)):,}   (exact integer count)")
+    A(f"  porosity     : {phi:.6f}   [fluid / total]")
     A(f"  voxel size   : " + " x ".join(f"{v:.4e}" for v in vox))
     A("")
     A("  <numDomain>")
@@ -1591,6 +1793,22 @@ def write_info_file(
         A("  -- Generator parameters --")
         for k, v in params.items():
             A(f"  {k:<18}: {v}")
+    if info:
+        A("")
+        A("  -- Realised generation --")
+        for k, v in info.items():
+            if isinstance(v, float):
+                v = f"{v:.6g}"
+            A(f"  {k:<18}: {v}")
+    A("")
+    A("  -- File format --")
+    A("  .dat : plain-text (UTF-8) voxel file, 0 = fluid, 1 = solid,")
+    A("         tab-separated; x-slices of ny rows x nz columns separated by")
+    A("         a blank line (3-D). Read with whitespace-delimited >> in C++.")
+    if metrics:
+        from .metrics import format_metrics
+        A("")
+        A(format_metrics(metrics))
     if dat_name:
         A("")
         A(f"  -- How to run --")
@@ -1611,13 +1829,20 @@ def export_all(
     stl:         bool  = True,
     png:         bool  = True,
     verbose:     bool  = True,
+    info:        dict  = None,
+    metrics:     bool  = False,
+    flow_axis:   int   = 0,
 ) -> dict:
     """
     ONE-CALL simulation-ready bundle. Writes:
         <basename>.dat        PALABOS voxel file (0 fluid / 1 solid)
         <basename>.stl        binary surface mesh          (3-D grids only)
         <basename>.png        rendered preview
-        <basename>_info.txt   dimensions, porosity, XML snippets, parameters
+        <basename>_info.txt   dimensions, exact voxel counts, porosity,
+                              XML snippets, parameters, realised info
+        <basename>_metrics.json  structural/topological metrics
+                              (only when metrics=True; see porousgen.metrics)
+    `info` is the dict returned by a generator called with return_info=True.
     Returns a dict of the written paths.
     """
     out = {}
@@ -1627,7 +1852,8 @@ def export_all(
 
     if stl and grid.ndim == 3:
         try:
-            export_stl(grid, f"{basename}.stl", verbose=verbose)
+            export_stl(grid, f"{basename}.stl", verbose=verbose,
+                       domain_size=domain_size)
             out["stl"] = f"{basename}.stl"
         except Exception as e:
             if verbose:
@@ -1654,8 +1880,18 @@ def export_all(
         if verbose:
             print(f"  [png]  {basename}.png")
 
+    m = None
+    if metrics:
+        import json
+        from .metrics import compute_metrics
+        m = compute_metrics(grid, domain_size=domain_size, flow_axis=flow_axis)
+        with open(f"{basename}_metrics.json", "w") as fh:
+            json.dump(m, fh, indent=2)
+        out["metrics"] = f"{basename}_metrics.json"
+        if verbose:
+            print(f"  [metrics] {basename}_metrics.json")
     write_info_file(grid, f"{basename}_info.txt", domain_size,
-                    params, dat_name=os.path.basename(dat))
+                    params, dat_name=os.path.basename(dat), info=info, metrics=m)
     out["info"] = f"{basename}_info.txt"
     if verbose:
         print(f"  [info] {basename}_info.txt")

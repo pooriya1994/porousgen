@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "porousgen"
-version = "1.0.0"
-description = "LBM-ready porous-media geometry generator: eight canonical architectures with exact porosity control and PALABOS/.stl/.png/info exports"
+version = "1.1.0"
+description = "LBM-ready porous-media geometry generator: eight architectures, exact porosity control, optional periodic RVEs, structural metrics, and PALABOS/.stl/.png/info exports"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -25,11 +25,18 @@ classifiers = [
 dependencies = ["numpy>=1.22", "scipy>=1.8", "matplotlib>=3.5",
                 "scikit-image>=0.19"]
 
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
 [project.scripts]
 porousgen = "porousgen.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/pooriya1994/porousgen"
+Changelog = "https://github.com/pooriya1994/porousgen/blob/main/CHANGELOG.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 include = ["porousgen*"]
