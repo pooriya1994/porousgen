@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "porousgen"
+version = "1.1.0"
+description = "LBM-ready porous-media geometry generator: eight architectures, exact porosity control, optional periodic RVEs, structural metrics, and PALABOS/.stl/.png/info exports"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+  {name = "Pooriya Ghorbani", email = "p_ghorbani@mecheng.iust.ac.ir"},
+  {name = "Majid Siavashi",   email = "msiavashi@iust.ac.ir"},
+]
+keywords = ["porous media", "lattice Boltzmann", "PALABOS", "geometry",
+            "Voronoi foam", "gyroid", "adsorption"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = ["numpy>=1.22", "scipy>=1.8", "matplotlib>=3.5",
+                "scikit-image>=0.19"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+porousgen = "porousgen.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/pooriya1994/porousgen"
+Changelog = "https://github.com/pooriya1994/porousgen/blob/main/CHANGELOG.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["porousgen*"]
