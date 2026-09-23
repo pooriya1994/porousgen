@@ -8,6 +8,17 @@ release is tagged `vX.Y.Z` on GitHub and archived on Zenodo.
 Revision in response to the SoftwareX review of the v1.0 article.
 
 ### Fixed
+- **Windows CI failure: `UnicodeEncodeError` on non-ASCII console output.**
+  Verbose generator output (φ, →, —, box-drawing characters) crashed on
+  Windows, where the default stdout/pipe encoding is the system codepage
+  (e.g. cp1252), not UTF-8 — reproducible losslessly with `PYTHONIOENCODING=
+  cp1252:strict`. All runtime `print()`/report output is now plain ASCII
+  (`φ` → `phi`, `→` → `->`, etc.); Unicode remains only in source-level
+  docstrings and comments, which are unaffected since Python reads `.py`
+  files as UTF-8 regardless of platform. `write_info_file` and the metrics
+  JSON writer now open their output with `encoding="utf-8"` explicitly, and
+  the CLI reconfigures stdout/stderr to UTF-8 with `errors="replace"` as a
+  defence-in-depth fallback for any future or third-party non-ASCII output.
 - **Gyroid exact porosity.** v1.0 estimated the Gyroid threshold on a
   separate fixed-size sample (256³ / 512²) and applied it to the requested
   grid, so the fluid-voxel count could miss the target by thousands of

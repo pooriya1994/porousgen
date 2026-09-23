@@ -269,7 +269,7 @@ def export_palabos(
         phi  = compute_porosity(g)
         size = os.path.getsize(filename) / 1024
         print(f"  [PALABOS]  {filename!r:40s}  "
-              f"shape={g.shape}  φ={phi:.4f}  ({size:.0f} KB)")
+              f"shape={g.shape}  phi={phi:.4f}  ({size:.0f} KB)")
 
 
 def read_palabos(filename: str, shape: tuple = None) -> np.ndarray:
@@ -325,10 +325,10 @@ def export_stl(
     the .dat voxel file is the simulation input for lattice-Boltzmann codes.
     """
     if not _HAS_MARCHING_CUBES:
-        print("  [STL] Skipped — install scikit-image to enable mesh export.")
+        print("  [STL] Skipped - install scikit-image to enable mesh export.")
         return
     if grid.ndim != 3:
-        print("  [STL] Skipped — STL export requires a 3-D grid.")
+        print("  [STL] Skipped - STL export requires a 3-D grid.")
         return
     os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
 
@@ -341,7 +341,7 @@ def export_stl(
     if closed:
         solid = np.pad(solid, 1, mode="constant", constant_values=0.0)
     if solid.min() == solid.max():
-        print("  [STL] Skipped — grid has no fluid/solid interface.")
+        print("  [STL] Skipped - grid has no fluid/solid interface.")
         return
     verts, faces, _, _ = _mc(solid, level=0.5, spacing=tuple(h),
                              allow_degenerate=False)
@@ -541,7 +541,7 @@ def generate_granular(
     if verbose:
         if polydisperse:
             print(f"  Granular (polydisperse, {size_distribution}): "
-                  f"r ∈ [{radius_min:.3f}, {radius_max:.3f}] m, "
+                  f"r in [{radius_min:.3f}, {radius_max:.3f}] m, "
                   f"placed {len(centres)}/{n_particles} in {attempt + 1} RSA trials")
         else:
             print(f"  Granular (monodisperse): r = {radius:.3f} m, "
@@ -732,7 +732,7 @@ def generate_fibrous(
         phi = compute_porosity(grid)
         extra = (f", r* = {info['fiber_radius_effective']:.4g}"
                  if porosity is not None else "")
-        print(f"  Fibrous: {n_fibers} fibres,  φ = {phi:.4f}{extra}"
+        print(f"  Fibrous: {n_fibers} fibres,  phi = {phi:.4f}{extra}"
               f"  ({'periodic' if periodic else 'non-periodic'})")
     return (grid, info) if return_info else grid
 
@@ -832,7 +832,7 @@ def generate_cellular(
         mode = (f"target φ={target_porosity}" if target_porosity is not None
                 else f"wall = {n_dilate} vox")
         print(f"  Cellular: {n_seeds} cells,  {mode},  "
-              f"{'periodic' if periodic else 'non-periodic'},  φ = {phi:.4f}")
+              f"{'periodic' if periodic else 'non-periodic'},  phi = {phi:.4f}")
     return (grid, info) if return_info else grid
 
 
@@ -928,7 +928,7 @@ def generate_consolidated(
     grid = np.where(fluid, FLUID, SOLID).astype(np.int8)
 
     if verbose:
-        print(f"  Consolidated: {n_fractures} fractures,  φ = {compute_porosity(grid):.4f}")
+        print(f"  Consolidated: {n_fractures} fractures,  phi = {compute_porosity(grid):.4f}")
     return (grid, info) if return_info else grid
 
 
@@ -1096,7 +1096,7 @@ def generate_ordered_gyroid(
     if verbose:
         phi = compute_porosity(grid)
         print(f"  Gyroid: L={L_cell:.4f} m,  t~{display_threshold:.4f},  "
-              f"{n_cells} cells/axis,  φ = {phi:.4f},  "
+              f"{n_cells} cells/axis,  phi = {phi:.4f},  "
               f"periodic={'yes' if all(periodic_axes) else periodic_axes}")
     return (grid, info) if return_info else grid
 
@@ -1220,7 +1220,7 @@ def visualize_catalog(
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight",
                     facecolor=fig.get_facecolor())
-        print(f"  [Figure]  saved → {save_path!r}")
+        print(f"  [Figure]  saved -> {save_path!r}")
 
     return fig
 
@@ -1337,9 +1337,9 @@ def visualize_3d_voxels(
 if __name__ == "__main__":
 
     print()
-    print("━" * 70)
-    print("  POROUS MEDIA GEOMETRY GENERATOR  ·  PALABOS LBM Export")
-    print("━" * 70)
+    print("=" * 70)
+    print("  POROUS MEDIA GEOMETRY GENERATOR  -  PALABOS LBM Export")
+    print("=" * 70)
 
     OUT = "porous_media_output"
     os.makedirs(OUT, exist_ok=True)
@@ -1481,23 +1481,23 @@ if __name__ == "__main__":
     # ─────────────────────────────────────────────────────────────────────────
     elapsed = time.time() - t0
     print()
-    print(f"{'━'*56}")
-    print(f"  {'Geometry':<16} {'2-D φ':>10}  {'3-D φ':>10}")
-    print(f"  {'─'*14}  {'─'*9}  {'─'*9}")
+    print(f"{'='*56}")
+    print(f"  {'Geometry':<16} {'2-D phi':>10}  {'3-D phi':>10}")
+    print(f"  {'-'*14}  {'-'*9}  {'-'*9}")
     for name in g2:
         p2 = compute_porosity(g2[name])
         p3 = compute_porosity(g3[name])
         print(f"  {name:<16}  {p2:>9.4f}  {p3:>9.4f}")
-    print(f"{'━'*56}")
+    print(f"{'='*56}")
     print(f"  Total elapsed:  {elapsed:.1f} s")
     print(f"  Output folder:  '{OUT}/'")
-    print(f"{'━'*56}")
+    print(f"{'='*56}")
     print()
 
     # ─────────────────────────────────────────────────────────────────────────
     # VISUALISATION  1  — full 5-geometry catalog
     # ─────────────────────────────────────────────────────────────────────────
-    print("  Rendering catalog figure …")
+    print("  Rendering catalog figure ...")
     fig_cat = visualize_catalog(
         grids_2d  = g2,
         grids_3d  = g3,
@@ -1507,7 +1507,7 @@ if __name__ == "__main__":
     # ─────────────────────────────────────────────────────────────────────────
     # VISUALISATION  2  —  individual 3-D voxel renders (small crop for speed)
     # ─────────────────────────────────────────────────────────────────────────
-    print("  Rendering individual 3-D voxel figures …")
+    print("  Rendering individual 3-D voxel figures ...")
     crop = 24   # render a 24³ crop so voxels() is fast
     for name, grid_3d in g3.items():
         sub = grid_3d[:crop, :crop, :crop]
@@ -1587,8 +1587,8 @@ def generate_open_foam(
     info = dict(generator="open_foam", periodic=periodic,
                 n_cells_total=len(seeds), porosity_control="exact")
     if verbose:
-        print(f"  Open foam: {len(seeds)} cells,  target φ={porosity:.3f}"
-              f"  ->  φ = {compute_porosity(grid):.4f}"
+        print(f"  Open foam: {len(seeds)} cells,  target phi={porosity:.3f}"
+              f"  ->  phi = {compute_porosity(grid):.4f}"
               f"  ({'periodic' if periodic else 'non-periodic'})")
     return (grid, info) if return_info else grid
 
@@ -1668,8 +1668,8 @@ def generate_blob(
     info = dict(generator="blob", periodic=periodic, porosity_control="exact",
                 kernel_sigma_vox=[round(float(x), 3) for x in sigma])
     if verbose:
-        print(f"  Blobs: corr={correlation_length},  target φ={porosity:.3f}"
-              f"  ->  φ = {compute_porosity(grid):.4f}"
+        print(f"  Blobs: corr={correlation_length},  target phi={porosity:.3f}"
+              f"  ->  phi = {compute_porosity(grid):.4f}"
               f"  ({'periodic' if periodic else 'non-periodic'})")
     return (grid, info) if return_info else grid
 
@@ -1736,8 +1736,8 @@ def generate_overlapping_spheres(
                 porosity_control="exact")
     if verbose:
         print(f"  Overlapping spheres: {n} spheres, r*={r_eff:.4g} "
-              f"(nominal {radius}),  target φ={porosity:.3f}"
-              f"  ->  φ = {compute_porosity(grid):.4f}"
+              f"(nominal {radius}),  target phi={porosity:.3f}"
+              f"  ->  phi = {compute_porosity(grid):.4f}"
               f"  ({'periodic' if periodic else 'non-periodic'})")
     return (grid, info) if return_info else grid
 
@@ -1765,7 +1765,7 @@ def write_info_file(
     L = []
     A = L.append
     A("=" * 66)
-    A("  PorousGen — Geometry Report")
+    A("  PorousGen - Geometry Report")
     A(f"  generated by PorousGen v{__version__}")
     A("  " + time.strftime("%Y-%m-%d %H:%M:%S"))
     A("=" * 66)
@@ -1816,7 +1816,7 @@ def write_info_file(
         A(f"  2. Copy the <numDomain>/<domain> blocks above into the XML.")
     A("=" * 66)
     text = "\n".join(L)
-    with open(filename, "w") as fh:
+    with open(filename, "w", encoding="utf-8") as fh:
         fh.write(text + "\n")
     return text
 
@@ -1885,7 +1885,7 @@ def export_all(
         import json
         from .metrics import compute_metrics
         m = compute_metrics(grid, domain_size=domain_size, flow_axis=flow_axis)
-        with open(f"{basename}_metrics.json", "w") as fh:
+        with open(f"{basename}_metrics.json", "w", encoding="utf-8") as fh:
             json.dump(m, fh, indent=2)
         out["metrics"] = f"{basename}_metrics.json"
         if verbose:

@@ -22,6 +22,17 @@ import sys
 
 from . import generator as G
 
+# Windows does not default stdout/stderr to UTF-8 (the console/pipe encoding
+# follows the system codepage). All PorousGen output is ASCII by design (see
+# CHANGELOG v1.1.0), so this is defence in depth against any future or
+# third-party message that isn't: replace instead of crashing.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 
 def _table() -> str:
     rows = ["  generator             porosity   periodic",
